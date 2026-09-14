@@ -1,0 +1,29 @@
+# 依赖
+node_modules/
+srv/node_modules/
+
+# 构建 / 剖析产物
+prof/
+*.cpuprofile
+.npmcache/
+
+# 运行时产物
+*.log
+saves/
+
+# 本地环境变量（千万不要提交）
+.env
+.env.*
+!.env.example
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 备份文件
+*.bak
+*.orig
+*.keep

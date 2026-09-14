@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>王朝纪元 · 1444</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;user-select:none}
+html,body{width:100%;height:100%;overflow:hidden;background:#10141a;font-family:"Microsoft YaHei","PingFang SC",sans-serif;color:#d8cfc0}
+canvas#map{position:absolute;inset:0;display:block;cursor:grab}
+canvas#map.dragging{cursor:grabbing}
+.hidden{display:none!important}
+/* ---------- 顶栏 ---------- */
+#topbar{position:absolute;top:0;left:0;right:0;height:44px;background:linear-gradient(#26221c,#1a1815);border-bottom:1px solid #6b5b33;display:flex;align-items:center;padding:0 10px;gap:14px;z-index:20;box-shadow:0 2px 8px rgba(0,0,0,.5)}
+#topbar .logo{font-family:Georgia,serif;font-weight:700;color:#c9a959;letter-spacing:2px;font-size:15px}
+#topbar .chip{display:inline-block;width:12px;height:12px;border:1px solid #000;margin-right:5px;vertical-align:-1px}
+#topbar .stat{font-size:12px;color:#cfc4ac;white-space:nowrap}
+#topbar .stat b{color:#e8d9b0;font-weight:600}
+#topbar .spacer{flex:1}
+#topbar button{background:#3a332a;border:1px solid #6b5b33;color:#d8cfc0;font-size:12px;padding:3px 8px;cursor:pointer;border-radius:2px}
+#topbar button:hover{background:#4c4232}
+#topbar button.active{background:#6b5b33;color:#fff}
+#tb-date{font-family:Georgia,serif;font-size:13px;color:#e8d9b0;min-width:120px;text-align:center}
+/* ---------- 模式栏 ---------- */
+#modebar{position:absolute;top:52px;left:8px;z-index:15;display:flex;flex-direction:column;gap:4px}
+#modebar button{background:rgba(26,24,20,.92);border:1px solid #55492c;color:#cfc4ac;font-size:12px;padding:4px 10px;cursor:pointer;border-radius:2px;text-align:left;min-width:86px}
+#modebar button:hover{border-color:#c9a959;color:#ffe9b0}
+#modebar button.active{background:#6b5b33;color:#fff}
+/* ---------- 侧面板 ---------- */
+#sidepanel{position:absolute;top:52px;right:8px;bottom:8px;width:308px;background:rgba(20,19,16,.96);border:1px solid #55492c;border-radius:3px;z-index:15;display:flex;flex-direction:column;box-shadow:0 2px 12px rgba(0,0,0,.5)}
+#panel-tabs{display:flex;border-bottom:1px solid #55492c}
+#panel-tabs button{flex:1;background:#241f18;border:none;border-right:1px solid #3a3222;color:#a89a7c;font-size:13px;padding:7px 0;cursor:pointer}
+#panel-tabs button:last-child{border-right:none}
+#panel-tabs button.active{background:#3a332a;color:#e8d9b0;font-weight:600}
+#panel-body{flex:1;overflow-y:auto;padding:10px;font-size:12.5px;line-height:1.55}
+#panel-body::-webkit-scrollbar{width:6px}
+#panel-body::-webkit-scrollbar-thumb{background:#55492c}
+#panel-body h3{font-family:Georgia,serif;color:#c9a959;font-size:14px;margin:6px 0 6px;border-bottom:1px solid #3a3222;padding-bottom:4px}
+#panel-body h4{color:#e0cf9f;font-size:12.5px;margin:10px 0 4px}
+#panel-body .row{display:flex;justify-content:space-between;padding:1px 0}
+#panel-body .row span:first-child{color:#a89a7c}
+#panel-body button.act{background:#4a3d22;border:1px solid #8a7440;color:#ffe9b0;font-size:12px;padding:4px 10px;cursor:pointer;border-radius:2px;margin:4px 6px 4px 0}
+#panel-body button.act:hover{background:#5f4e2a}
+#panel-body button.act:disabled{opacity:.4;cursor:default}
+#panel-body button.danger{background:#4a2222;border-color:#8a4040;color:#ffb0b0}
+#panel-body input[type=text]{background:#11100c;border:1px solid #55492c;color:#d8cfc0;padding:4px 6px;font-size:12px;width:100%;border-radius:2px;margin-bottom:6px}
+#panel-body label.ck{display:flex;justify-content:space-between;padding:2px 0;cursor:pointer}
+#panel-body .badge{font-size:11px;padding:1px 6px;border-radius:2px;border:1px solid}
+.badge.war{color:#ff9080;border-color:#8a4040;background:#3a2020}
+.badge.truce{color:#ffd080;border-color:#8a7440;background:#3a3020}
+.badge.peace{color:#b0c8a0;border-color:#4a6a40;background:#22301c}
+.badge.self{color:#a0c0ff;border-color:#40608a;background:#1c2838}
+.badge.vassal{color:#e8d090;border-color:#8a7a40;background:#33301c}
+.badge.suz{color:#d0b0ff;border-color:#7a5aa0;background:#2c2340}
+.badge.ally{color:#a8e0b0;border-color:#4a8a50;background:#1c3320}
+.c-row{display:flex;align-items:center;gap:6px;padding:5px 6px;cursor:pointer;border-radius:2px}
+.c-row:hover{background:#2c271e}
+.c-row .cd{width:11px;height:11px;border:1px solid #000;flex:none}
+.c-row .cn{flex:1}
+.c-row .cs{color:#8f8266;font-size:11px}
+.c-row.vassal{background:rgba(124,96,182,.12)}
+.c-row.vassal.my{background:rgba(186,140,238,.18)}
+.c-row.vassal .cd{border-color:#5a3a8a}
+.c-row.vassal.my .cd{border-color:#b08ae0}
+.c-row.diplo-open,.c-row.diplo-open:hover{background:#2c2340}
+.diplo-detail{margin:2px 0 8px 23px;padding:6px 8px;background:#1a1610;border:1px solid #3a3222;border-radius:2px;font-size:12px;line-height:1.8}
+.diplo-detail .row2{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.diplo-detail .lbl{color:#a89a7c}
+.diplo-detail button.act{padding:2px 8px;font-size:11px;margin:2px 4px 2px 0}
+.warbar{height:8px;background:#20140f;border:1px solid #5a3a2a;position:relative;margin:4px 0;border-radius:2px;overflow:hidden}
+.warbar .fill{position:absolute;top:0;bottom:0}
+.sep{border-top:1px solid #3a3222;margin:8px 0}
+/* ---------- 日志 ---------- */
+#logpanel{position:absolute;left:8px;bottom:8px;width:330px;max-height:180px;z-index:14;background:rgba(16,15,12,.88);border:1px solid #3a3222;border-radius:3px;padding:6px 8px;overflow-y:auto;font-size:11.5px;line-height:1.5}
+#logpanel::-webkit-scrollbar{width:6px}
+#logpanel::-webkit-scrollbar-thumb{background:#55492c}
+#logpanel .le{color:#b5a888}
+#logpanel .le.war{color:#ff9080}
+#logpanel .le.good{color:#a8d890}
+#logpanel .le.gold{color:#ffd080}
+#logpanel .lt{color:#c9a959;font-weight:600;margin-bottom:2px;font-family:Georgia,serif}
+/* ---------- 模态 ---------- */
+.modal{position:absolute;inset:0;background:rgba(8,8,10,.78);z-index:50;display:flex;align-items:center;justify-content:center}
+.mbox{background:#1c1a15;border:1px solid #6b5b33;border-radius:4px;box-shadow:0 6px 40px rgba(0,0,0,.7);padding:0;width:520px;max-width:94vw;max-height:86vh;display:flex;flex-direction:column}
+.mbox .mhead{padding:14px 18px 10px;border-bottom:1px solid #3a3222}
+.mbox .mhead h2{font-family:Georgia,serif;color:#c9a959;font-size:20px;letter-spacing:3px}
+.mbox .mhead p{color:#8f8266;font-size:12px;margin-top:3px}
+.mbox .mbody{padding:12px 18px 16px;overflow-y:auto}
+.mbox .mbody::-webkit-scrollbar{width:6px}
+.mbox .mbody::-webkit-scrollbar-thumb{background:#55492c}
+.mbox input[type=text]{background:#11100c;border:1px solid #55492c;color:#d8cfc0;padding:6px 8px;font-size:13px;width:100%;border-radius:2px;margin-bottom:8px}
+.mbox button.act{background:#4a3d22;border:1px solid #8a7440;color:#ffe9b0;font-size:13px;padding:6px 16px;cursor:pointer;border-radius:2px}
+.mbox button.act:hover{background:#5f4e2a}
+/* ---------- 加载 ---------- */
+#loading{position:absolute;inset:0;background:#10141a;z-index:100;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px}
+#loading .lt1{font-family:Georgia,serif;font-size:34px;color:#c9a959;letter-spacing:8px}
+#loading .lt2{color:#8f8266;font-size:13px;letter-spacing:3px}
+#loading .lb{width:220px;height:3px;background:#2c271e;border-radius:2px;overflow:hidden}
+#loading .lb i{display:block;height:100%;width:0;background:#c9a959;transition:width .3s}
+#ld-msg{color:#a89a7c;font-size:12px}
+#ld-err{color:#ff9080;font-size:12px;max-width:480px;text-align:center;line-height:1.6}
+kbd{background:#2c271e;border:1px solid #55492c;border-radius:2px;padding:0 4px;font-size:11px}
+.hint{color:#8f8266;font-size:11.5px}
+/* ---------- 存档弹窗 ---------- */
+#slotmodal .mbox{width:560px}
+#slotmodal .mbody{padding:14px 18px 16px}
+.slot-name-row{display:flex;gap:8px;margin-bottom:6px}
+.slot-name-row input{flex:1;margin-bottom:0}
+.slot-name-row button{white-space:nowrap}
+.slot-hint{color:#8f8266;font-size:11.5px;margin:2px 0 8px}
+.slot-row{display:flex;align-items:center;gap:10px;padding:7px 8px;margin:3px 0;background:#16130e;border:1px solid #332c1e;border-radius:3px;cursor:pointer;user-select:none}
+.slot-row:hover{background:#221c11;border-color:#6b5b33}
+.slot-row .sl-name{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;color:#e6dcc8}
+.slot-row .sl-time{flex:1;text-align:right;color:#8f8266;font-size:11px;white-space:nowrap}
+.slot-row .sl-del{flex:0 0 auto;font-size:11px;color:#8f8266;background:transparent;border:1px solid #55492c;border-radius:2px;padding:2px 8px;cursor:pointer;white-space:nowrap}
+.slot-row .sl-del:hover{color:#ff9080;border-color:#a0503a}
+.slot-row .sl-del.confirm{color:#ff6050;border-color:#ff6050;background:rgba(255,80,60,.08)}
+.slot-row .sl-btn{flex:0 0 auto;font-size:12px;color:#ffe9b0;background:#4a3d22;border:1px solid #8a7440;border-radius:2px;padding:2px 10px;cursor:pointer;white-space:nowrap}
+.slot-row .sl-btn:hover{background:#5f4e2a}
+.slot-empty{color:#8f8266;font-size:12.5px;text-align:center;padding:22px 0}
+.slot-sep{margin:10px 0 6px;border-top:1px solid #3a3222;color:#a89a7c;font-size:12px;letter-spacing:1px}
+/* ---------- 联机大厅 ---------- */
+#lobby .mbox{width:620px}
+.lb-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.lb-row input{flex:1;min-width:120px;margin-bottom:0}
+.lb-row .act{margin:0;white-space:nowrap}
+.lb-or{color:#8f8266;font-size:12px}
+.lb-room-head{display:flex;align-items:baseline;gap:10px;justify-content:center;padding:6px 0 2px}
+.lb-room-head span{color:#a89a7c;font-size:12px}
+.lb-room-head b{font-family:Georgia,serif;font-size:30px;letter-spacing:8px;color:#ffd080}
+.lb-actions{margin-top:8px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+#lb-msg{margin-top:10px;font-size:12.5px;min-height:18px;color:#a89a7c}
+#lb-msg.err{color:#ff9080}
+#lb-players .c-row{cursor:default}
+#lb-countries .c-row{border:1px solid transparent}
+#lb-countries .c-row.diplo-open{border-color:#6b5b33}
+#lb-chat{max-height:110px;overflow-y:auto;background:#14120e;border:1px solid #332c1e;border-radius:3px;padding:6px 8px;font-size:12px;line-height:1.6;margin-bottom:6px}
+#lb-chat::-webkit-scrollbar{width:6px}
+#lb-chat::-webkit-scrollbar-thumb{background:#55492c}
+.lb-chat-line b{color:#c9a959}
+#tb-room:hover{color:#ffe9b0}
+#tb-who{max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+</style>
+</head>
+<body>
+<canvas id="map"></canvas>
+
+<div id="loading">
+  <div class="lt1">王朝纪元</div>
+  <div class="lt2">1444 · 大 战 略</div>
+  <div class="lb"><i id="ld-bar"></i></div>
+  <div id="ld-msg">正在苏醒……</div>
+  <div id="ld-err"></div>
+</div>
+
+<header id="topbar" class="hidden">
+  <span class="logo">王朝纪元</span>
+  <span class="stat" id="tb-country"></span>
+  <span class="stat" id="tb-ruler"></span>
+  <span class="stat" id="tb-gold"></span>
+  <span class="stat" id="tb-mp"></span>
+  <span class="stat" id="tb-fl"></span>
+  <span class="spacer"></span>
+  <span id="tb-date"></span>
+  <button id="btn-pause" data-act="pause">⏸ 暂停</button>
+  <span id="speeds"></span>
+</header>
+
+<div id="modebar" class="hidden">
+  <button data-act="mode" data-v="political" class="active">政治地图</button>
+  <button data-act="mode" data-v="dev">发展度</button>
+  <button data-act="mode" data-v="rel">外交关系</button>
+  <div class="sep"></div>
+  <button data-act="save">保存进度</button>
+  <button data-act="load">读取进度</button>
+  <button data-act="help">游戏指南</button>
+</div>
+
+<div id="sidepanel" class="hidden">
+  <div id="panel-tabs">
+    <button data-act="tab" data-v="info" class="active">信息</button>
+    <button data-act="tab" data-v="diplo">外交</button>
+    <button data-act="tab" data-v="war">战争</button>
+  </div>
+  <div id="panel-body"></div>
+</div>
+
+<div id="logpanel" class="hidden"><div class="lt">史官记事</div><div id="log-body"></div></div>
+
+<div id="selectmodal" class="modal hidden">
+  <div class="mbox">
+    <div class="mhead"><h2>选择你的王朝</h2><p>公元1444年11月11日 · 世界群雄并起，选择一个国家开始你的霸业</p></div>
+    <div class="mbody">
+      <input type="text" id="sel-search" placeholder="搜索国家……">
+      <div id="sel-list" style="max-height:340px;overflow-y:auto"></div>
+      <div style="margin-top:10px;text-align:right">
+        <button class="act" id="btn-start-load" data-act="load" style="display:none;margin-right:10px">📜 读取存档</button>
+        <button class="act" data-act="random-start">听天由命（随机）</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="helpmodal" class="modal hidden">
+  <div class="mbox">
+    <div class="mhead"><h2>游戏指南</h2><p>你的目标是：在这纷乱之世开疆拓土，建立不世王朝</p></div>
+    <div class="mbody" style="font-size:12.5px;line-height:1.8">
+      <b style="color:#c9a959">基本操作</b><br>
+      · <kbd>左键</kbd> 点选省份 / 军队；选中己方军队后再点目标省份即可下达行军令<br>
+      · <kbd>右键</kbd> 取消选中军队的行军令；<kbd>双击</kbd> 居中视角<br>
+      · 拖拽平移地图，滚轮缩放；<kbd>空格</kbd> 暂停/继续，<kbd>1~5</kbd> 调速，<kbd>M</kbd> 切换地图模式<br>
+      <b style="color:#c9a959">内政</b><br>
+      · 每月税收 = 各省（税收+生产）× 0.05；军队维护费 = 兵力 × 0.15/千<br>
+      · 省份面板可「发展省份」（提升税基）与「招募军队」（25金 + 5000人力）<br>
+      · 人力池每月恢复上限的 1/120；兵力上限（军力上限）限制常备军规模<br>
+      <b style="color:#c9a959">战争</b><br>
+      · 外交页向他国宣战（注意停战期）；军队开进敌境即开始围城，占领后计入战争分数<br>
+      · 敌我军队同省即发生会战；战争分数 = 占领 + 会战胜利<br>
+      · 战争页可索要被你占领的敌国省份；分数不足对方会拒绝；打不动了也可白和或求和<br>
+      · 战争页可<b style="color:#d0b0ff">要求战败方释放附庸</b>（花战争分数，附庸疆土归其自己，重获独立）<br>
+      · 战争页可<b style="color:#a0d0a0">盟友参战</b>：被进攻方的盟友有概率履约参战（≤3 人），终结主和约时连带终结<br>
+      · 战争页<b style="color:#ff8080">实时伤亡</b>显示双方累计阵亡（含会战、远征损耗、欠饷溃散）<br>
+      · 停战期为 10 年
+      <b style="color:#c9a959">藩属</b><br>
+      · 省份面板可<b style="color:#d0b0ff">赐地给附庸</b>：选中我方省份后从下拉框挑一个小弟，点「赐地」即移交<br>
+      · 附庸（含附庸的附庸）随我参战，岁贡三成收入<br>
+      · 外交页可册封、吞并、解除附庸；册封条件：与本国<b style="color:#d0b0ff">陆地相连或近海（≤3°）可达</b><br>
+      · 占领他国故土后，外交页<b style="color:#d0b0ff">「复国之机」</b>可将亡国就地释放为我方附庸
+      <b style="color:#c9a959">盟友</b><br>
+      · 外交页向他国<b style="color:#a0d0a0">结盟</b>（互不侵犯、共同防御）；双方交战时盟约作废<br>
+      · 盟友可随时<b style="color:#ff8080">断盟</b>；被灭国、被吞并、被册封时盟约自动解除
+      <b style="color:#c9a959">割地地图</b><br>
+      · 战争页"提出合约"左侧的<b style="color:#d0b0ff">🗺 割地地图</b>按钮可开启点选模式：金色=可割、红色=已选、灰色=禁用<br>
+      · 点击省份直接切换复选框状态，右侧条款同步；再按一次按钮或达成条款可关闭<br>
+      <b style="color:#c9a959">提示</b><br>
+      · AI 同样会扩张、宣战、求和——包括对你。留意外交页的敌意<br>
+      · 进度可存成<b style="color:#a0d0a0">多个档位</b>，命名后随时读取；<br>
+      · 桌面版存档在程序旁的 <b style="color:#d0b0ff">saves 文件夹</b>里，网页版存在浏览器中，互不影响<br>
+    </div>
+    <div style="padding:10px 18px 16px;text-align:right"><button class="act" data-act="close-help">开始游戏</button></div>
+  </div>
+</div>
+
+<div id="defeatmodal" class="modal hidden">
+  <div class="mbox" style="text-align:center">
+    <div class="mhead"><h2>王朝覆灭</h2><p id="defeat-text"></p></div>
+    <div class="mbody" style="text-align:center"><button class="act" data-act="restart">重新开始</button></div>
+  </div>
+</div>
+
+<div id="slotmodal" class="modal hidden">
+  <div class="mbox">
+    <div class="mhead"><h2 id="slot-title">存档管理</h2><p id="slot-sub"></p></div>
+    <div class="mbody">
+      <div id="slot-save-area" class="hidden">
+        <div class="slot-name-row">
+          <input type="text" id="slot-name" placeholder="给这局游戏起个名字……" maxlength="40">
+          <button class="act" data-act="slot-save">保存</button>
+        </div>
+        <div class="slot-hint" id="slot-hint-save">输入新名字保存；点击下方旧存档可把名字填上来覆盖它。</div>
+      </div>
+      <div id="slot-list" style="max-height:300px;overflow-y:auto"></div>
+      <div style="margin-top:10px;text-align:right">
+        <button class="act" data-act="slot-back">返回</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 联机大厅 ================= -->
+<div id="lobby" class="modal">
+  <div class="mbox" style="width:620px">
+    <div class="mhead"><h2>王朝纪元 · 大厅</h2><p>创建房间，把房间号发给朋友，一起争夺天下</p></div>
+    <div class="mbody">
+      <div id="lobby-entry">
+        <h4>你的名字</h4>
+        <input type="text" id="lb-name" maxlength="12" placeholder="如：腓特烈">
+        <div class="lb-row">
+          <button class="act" data-act="lb-create">🏰 创建房间</button>
+          <span class="lb-or">或</span>
+          <input type="text" id="lb-code" maxlength="6" inputmode="numeric" placeholder="房间号">
+          <button class="act" data-act="lb-join">🚪 加入房间</button>
+        </div>
+        <div class="sep"></div>
+        <div class="lb-row">
+          <button class="act" data-act="lb-solo" style="background:#2a3a2a;border-color:#4a7a4a;color:#b8e8b8">🎮 单机游戏</button>
+          <span class="hint">不联机，与你一个人的世界</span>
+        </div>
+        <div id="lb-msg"></div>
+      </div>
+
+      <div id="lobby-room" class="hidden">
+        <div class="lb-room-head">
+          <span>房间号</span><b id="lb-roomcode"></b>
+        </div>
+        <h4>玩家</h4>
+        <div id="lb-players"></div>
+        <div id="lb-actions" class="lb-actions"></div>
+        <div class="sep"></div>
+        <h4>选择你的国家（点击即选，已选的国家别人不能再选）</h4>
+        <input type="text" id="lb-search" placeholder="搜索国家……">
+        <div id="lb-countries" style="max-height:230px;overflow-y:auto"></div>
+      </div>
+
+      <div id="lb-chat-wrap" class="hidden">
+        <div class="sep"></div>
+        <h4>房间聊天</h4>
+        <div id="lb-chat"></div>
+        <div class="lb-row">
+          <input type="text" id="lb-chat-input" maxlength="160" placeholder="说点什么……（回车发送）">
+          <button class="act" data-act="lb-chat-send">发送</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="world-data.js"></script>
+<script src="game-core.js"></script>
+<script src="net.js"></script>
+<script src="client.js"></script>
+</body>
+</html>
