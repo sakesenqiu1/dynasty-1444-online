@@ -79,19 +79,29 @@ AI 会把**每一个真人玩家**都当成玩家对待。同时把渲染调用�
 只需要 Node.js 18+。
 
 ```bash
-cd srv
-npm install            # 唯一依赖：ws
-PORT=7788 BASE=/gs node server.js
+npm install            # 同时装好 srv/ 的依赖（唯一运行时依赖：ws）
+npm start              # 等价于 node srv/server.js
 ```
 
-然后浏览器打开 <http://127.0.0.1:7788/gs/>
+默认监听 `127.0.0.1:7788`，子路径 `/gs/`。然后浏览器打开 <http://127.0.0.1:7788/gs/>
+
+想改端口或路径：
+
+```bash
+PORT=8080 BASE=/game node srv/server.js     # -> http://127.0.0.1:8080/game/
+```
 
 Windows PowerShell：
 
 ```powershell
-cd srv
 npm install
-$env:PORT=7788; $env:BASE="/gs"; node server.js
+$env:PORT=7788; $env:BASE="/gs"; node srv/server.js
+```
+
+也可以只装服务端：
+
+```bash
+cd srv && npm install && node server.js
 ```
 
 开两个浏览器窗口（或一个正常窗口 + 一个隐私窗口）就能自己和自己联机测试。
@@ -123,6 +133,14 @@ node tools/run.mjs tools/sh/deploy-https.sh     # 可选：切到 HTTPS
 ---
 
 ## 测试
+
+```bash
+npm test          # 12 个本地测试，不需要服务器
+```
+
+CI 每次提交都会自动跑一遍（见 `.github/workflows/tests.yml`）。
+
+也可以单独跑：
 
 ```bash
 # 本地（不需要服务器）
