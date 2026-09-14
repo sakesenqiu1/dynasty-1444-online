@@ -753,28 +753,63 @@ class Room {
       const cn = [];
       for (let i = base.countryCount; i < st.countries.length; i++) {
         const c = st.countries[i];
-        if (c) cn.push([i, c.name, c.color, c.capital]);
+        if (!c) continue;
+        cn.push([i, c.name, c.color, c.capital]);
+        // 名字/颜色已经随 cn 发过了，登记进基线，免得下一帧 cp 再重复发一遍
+        if (base.countryMeta && c.color) base.countryMeta.set(i, { n: c.name, r: c.color[0], g: c.color[1], b: c.color[2] });
       }
       if (cn.length) delta.cn = cn;
       base.countryCount = st.countries.length;
     }
+    /* 盟约（allies）增量：只在结盟/断盟的那一帧发变动过的国家。
+       第一帧只建基线——玩家加入时快照里已经带了完整 allies。
+       基线存"拷贝"而不是引用：formAlliance 是原地 push、breakAlliance 是 filter
+       重建数组，存引用就永远比不出差异。steady state 下每帧只做长度+逐项整数比较，
+       不分配任何对象。 */
+    if (!base.allySig) {
+      base.allySig = new Map();
+      for (let i = 1; i < st.countries.length; i++) {
+        const c = st.countries[i];
+        if (c) base.allySig.set(i, (c.allies || []).slice());
+      }
+    } else {
+      let alOut = null;
+      for (let i = 1; i < st.countries.length; i++) {
+        const c = st.countries[i];
+        if (!c) continue;
+        const arr = c.allies || [];
+        const prev = base.allySig.get(i);
+        let same = !!prev && prev.length === arr.length;
+        if (same) for (let k = 0; k < arr.length; k++) if (prev[k] !== arr[k]) { same = false; break; }
+        if (same) continue;
+        base.allySig.set(i, arr.slice());
+        (alOut || (alOut = [])).push([i, arr.slice()]);
+      }
+      if (alOut) delta.al = alOut;
+    }
     /* 国名 / 旗色的改动（改国号、改属国颜色）：只在变动的那一帧发一次。
-       第一帧只建基线不发——玩家加入时本来就会收到整份世界快照。 */
+       第一帧只建基线不发——玩家加入时本来就会收到整份世界快照。
+       注意：这里刻意"存字段逐个比对"而不是拼签名字符串——每帧给 180+ 个国家
+       各拼一个字符串会造出大量垃圾对象，正是之前造成周期性卡顿的那类开销。 */
     if (!base.countryMeta) {
       base.countryMeta = new Map();
       for (let i = 1; i < st.countries.length; i++) {
         const c = st.countries[i];
-        if (c) base.countryMeta.set(i, c.name + '\u0001' + (c.color ? c.color.join(',') : ''));
+        if (c && c.color) base.countryMeta.set(i, { n: c.name, r: c.color[0], g: c.color[1], b: c.color[2] });
       }
     } else {
       let cpOut = null;
       for (let i = 1; i < st.countries.length; i++) {
         const c = st.countries[i];
-        if (!c) continue;
-        const sig = c.name + '\u0001' + (c.color ? c.color.join(',') : '');
-        if (base.countryMeta.get(i) === sig) continue;
-        base.countryMeta.set(i, sig);
-        (cpOut || (cpOut = [])).push([i, c.name, c.color ? c.color.slice() : null]);
+        if (!c || !c.color) continue;
+        const o = base.countryMeta.get(i);
+        if (o) {
+          if (o.n === c.name && o.r === c.color[0] && o.g === c.color[1] && o.b === c.color[2]) continue;
+          o.n = c.name; o.r = c.color[0]; o.g = c.color[1]; o.b = c.color[2];
+        } else {
+          base.countryMeta.set(i, { n: c.name, r: c.color[0], g: c.color[1], b: c.color[2] });
+        }
+        (cpOut || (cpOut = [])).push([i, c.name, c.color.slice()]);
       }
       if (cpOut) delta.cp = cpOut;
     }

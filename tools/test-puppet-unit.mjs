@@ -343,7 +343,39 @@ check('空白串返回空', t11.empty === '' && t11.nullv === '', t11);
 check('HTML 标签被剥掉（防注入）', !t11.script.includes('<') && !t11.script.includes('>'), t11);
 check('长度截到 12', t11.long === 12, t11);
 
-/* ================= 12. 回归：模拟长跑 ================= */
+/* ================= 12. 盟约随增量同步（联机 bug 回归） ================= */
+console.log('\n-- 12. 盟约 al 增量（盟友变蓝 + 可断盟） --');
+const tAlliance = run(`
+  resetWorld(); buildWorld(); player=140; setHumans([140,44]); MP.online=true; started=true;
+  const ally=countries.find(c=>c&&c.alive&&c.id!==140&&!c.overlord&&c.provList.length>2);
+  const before={ allied:isAllied(140,ally.id), color:relColorOf(ally.id).slice(),
+                 badge:relationBadge(ally.id) };
+  // 服务端只下发一条 al 增量（联机时本地从不执行 formAlliance）
+  mpDelta({ d:{ al:[[140,[ally.id]],[ally.id,[140]]] } });
+  const after={ allied:isAllied(140,ally.id), color:relColorOf(ally.id).slice(),
+                badge:relationBadge(ally.id), allies:countries[140].allies.slice() };
+  uiTab='diplo'; diploFocus=0; diploColorFor=0; uiSearch='';
+  refreshPanel();
+  const hasUnally=document.getElementById('diplo-list').innerHTML.includes('diplo-unally');
+  // 再下发一条"断盟"增量
+  mpDelta({ d:{ al:[[140,[]],[ally.id,[]]] } });
+  const broken={ allied:isAllied(140,ally.id), color:relColorOf(ally.id).slice() };
+  refreshPanel();
+  const hasAllyBtnAfterBreak=document.getElementById('diplo-list').innerHTML.includes('diplo-ally');
+  return { allyId:ally.id, before, after, hasUnally, broken, hasAllyBtnAfterBreak,
+           blue:REL_COL.self };
+`);
+check('增量到达前：不是盟友', tAlliance.before.allied === false, tAlliance);
+check('增量到达前：地图不是蓝色', !eq(tAlliance.before.color, tAlliance.blue), tAlliance);
+check('【修复】收到 al 增量后成为盟友', tAlliance.after.allied === true, tAlliance);
+check('【修复】盟友在地图上显示为蓝色', eq(tAlliance.after.color, tAlliance.blue), tAlliance);
+check('【修复】外交面板出现「断盟」按钮', tAlliance.hasUnally === true, tAlliance);
+check('盟友徽章不再是「和平」', !tAlliance.after.badge.includes('和平'), tAlliance.after.badge);
+check('收到断盟增量后不再是盟友', tAlliance.broken.allied === false, tAlliance);
+check('断盟后颜色不再是蓝色', !eq(tAlliance.broken.color, tAlliance.blue), tAlliance);
+check('断盟后按钮变回「结盟」', tAlliance.hasAllyBtnAfterBreak === true, tAlliance);
+
+/* ================= 13. 回归：模拟长跑 ================= */
 console.log('\n-- 12. 回归 --');
 const t12 = run(`
   resetWorld(); buildWorld(); setHumans([140,44]);

@@ -157,7 +157,7 @@ node tools/run.mjs tools/sh/deploy-https.sh     # 可选：切到 HTTPS
 ## 测试
 
 ```bash
-npm test          # 16 个本地测试，不需要服务器
+npm test          # 15 个本地测试，不需要服务器
 ```
 
 CI 每次提交都会自动跑一遍（见 `.github/workflows/tests.yml`）。
@@ -172,6 +172,7 @@ node tools/test-perf-unit.mjs       # 渲染调度与性能回归
 node tools/test-map-ghost.mjs       # 地图覆盖不变量（残影回归）
 node tools/test-mp.mjs              # 协议端到端（本地起服务，两个客户端）
 node tools/test-puppet-mp.mjs       # 傀儡国 / 改色 / 改名的协议广播
+node tools/test-ally-mp.mjs         # 盟约增量同步（结盟/断盟广播）
 node tools/test-recruit-unit.mjs    # 征兵队列
 node tools/test-vassal2-unit.mjs    # 复国 / 建立附庸国
 node tools/test-puppet-unit.mjs     # 傀儡国国体、叛乱倾向、外交配色、改色/改名
@@ -187,6 +188,7 @@ node tools/test-jitter.mjs          # 增量间隔抖动与带宽
 node tools/test-recruit-live.mjs    # 征兵集结期线上验证
 node tools/test-vassal-live.mjs     # 建立附庸国线上验证
 node tools/test-puppet-live.mjs     # 傀儡国 / 改色 / 改名线上验证
+node tools/test-ally-live.mjs       # 盟约同步线上验证
 node tools/test-pvp-live.mjs        # PvP 和谈线上验证
 node tools/test-load.mjs            # 并发与资源占用
 ```

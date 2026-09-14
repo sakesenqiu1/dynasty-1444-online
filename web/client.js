@@ -1004,6 +1004,7 @@ function relationBadge(cid){
       : '<span class="badge vassal">我朝附庸</span>';
   }
   if(overlordOf(player)===cid) return '<span class="badge suz">宗主</span>';
+  if(isAllied(player,cid)) return '<span class="badge ally">盟友</span>';
   if(truceBetween(player,cid)){
     const t=truces[truceKey(player,cid)];
     return `<span class="badge truce">停战</span>`;

@@ -42,3 +42,4 @@ jobs:
         run: |
           node tools/test-mp.mjs
           node tools/test-puppet-mp.mjs
+          node tools/test-ally-mp.mjs

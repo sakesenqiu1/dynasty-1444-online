@@ -445,6 +445,21 @@ function mpDelta(m) {
     if (labelsDirty && typeof rebuildLabels === 'function') rebuildLabels();
     markPanelDirty();
   }
+  /* 盟约（allies）增量：结盟/断盟时服务端会发变动过的国家。
+     没有这一段的话客户端永远停留在开局快照的盟友表上——
+     表现为"盟友在地图上不是蓝色、也找不到断盟按钮"。 */
+  if (d.al) {
+    for (const row of d.al) {
+      const c = countries[row[0]];
+      if (!c) continue;
+      c.allies = (row[1] || []).slice();
+    }
+    // 阵营（campOf）把盟友算在内，必须失效重算
+    if (typeof invalidateCamps === 'function') invalidateCamps();
+    if (mapMode === 'rel') recolorAll();
+    // 结盟/断盟很罕见，直接强刷侧栏，别等指纹比对
+    if (typeof forcePanelRefresh === 'function') forcePanelRefresh(); else markPanelDirty();
+  }
   if (d.dev && mapMode === 'dev') recolorAll();
   if (d.lg) {
     // 服务端按发生顺序推来，最新的要排在最前面
