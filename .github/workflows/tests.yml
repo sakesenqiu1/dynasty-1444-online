@@ -1,0 +1,41 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # ssh2 的可选原生依赖 cpu-features 在 CI 上没必要编译
+      - name: 安装依赖
+        run: npm install --omit=optional
+
+      - name: 内核与客户端单元测试
+        run: |
+          node tools/test-core.mjs
+          node tools/test-client-unit.mjs
+          node tools/test-perf-unit.mjs
+          node tools/test-map-ghost.mjs
+
+      - name: 玩法规则测试
+        run: |
+          node tools/test-recruit-unit.mjs
+          node tools/test-vassal2-unit.mjs
+          node tools/test-pvp-peace.mjs
+          node tools/test-fix3-unit.mjs
+          node tools/test-fix4-unit.mjs
+          node tools/test-fix5-unit.mjs
+          node tools/test-newcountry-label.mjs
+
+      - name: 协议端到端（本地起服务 + 两个客户端）
+        run: node tools/test-mp.mjs
