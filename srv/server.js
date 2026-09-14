@@ -339,6 +339,7 @@ class Room {
         if (st.countries[me].gold < cost) throw new Error('国库不足');
         st.countries[me].gold -= cost;
         tc.overlord = me;
+        tc.subject = core.SUBJ_VASSAL;      // 花钱册封 = 普通附庸国
         core.clearAllAlliances(t);
         st.truces[core.truceKey(me, t)] = st.dayCount + 3650;
         core.pushLog(`👑 ${tc.name} 接受册封，岁贡三成，为我藩篱`, 'gold', me);
@@ -354,10 +355,12 @@ class Room {
         const cost = Math.round(core.totalDev(tc) * 4);
         if (st.countries[me].gold < cost) throw new Error('国库不足');
         st.countries[me].gold -= cost;
+        // 被吞并国的附庸转奉我为宗主（沿用其原有国体：傀儡仍是傀儡）
         const inherited = st.countries.filter(vc => vc && vc.alive && vc.overlord === t);
         for (const vc of inherited) vc.overlord = me;
         for (const pid of [...tc.provList]) core.transferProvince(pid, me);
         tc.overlord = 0;
+        tc.subject = 0;
         core.pushLog(`👑 ${tc.name} 王祚断绝，疆土尽入我朝`, 'gold', me);
         for (const vc of inherited) core.pushLog(`👑 ${vc.name} 转奉我朝为主，为我藩属`, 'gold', me);
         break;
@@ -367,6 +370,7 @@ class Room {
         const tc = st.countries[t];
         if (!tc || core.overlordOf(t) !== me) throw new Error('对方不是你的附庸');
         tc.overlord = 0;
+        tc.subject = 0;
         st.truces[core.truceKey(me, t)] = st.dayCount + 1825;
         core.pushLog(`${tc.name} 重获独立，与我朝约定五年之好`, '', me);
         break;
@@ -394,6 +398,31 @@ class Room {
         core.pushLog(`👳 ${name} 于 ${pv.name} 立国，奉 ${st.countries[me].name} 为宗主`, 'gold', 0);
         break;
       }
+      case 'rename': {
+        const c = st.countries[me];
+        if (!c || !c.alive) throw new Error('我国已亡');
+        const name = core.sanitizeCountryName(m.name);
+        if (!name) throw new Error('国号不能为空');
+        if (name === c.name) throw new Error('新国号与旧国号相同');
+        if (c.gold < core.RENAME_COST) throw new Error(`国库不足，改易国号需 ${core.RENAME_COST} 金（现有 ${Math.round(c.gold)}）`);
+        c.gold -= core.RENAME_COST;
+        const oldName = c.name;
+        core.setCountryName(me, name);
+        core.pushLog(`✏ ${oldName} 改国号为「${name}」`, 'gold', 0);
+        break;
+      }
+      /* 属国改色：免费纯外观，但要宗主身份 + 颜色参数合法 */
+      case 'recolor': {
+        const t = +m.target;
+        const tc = st.countries[t];
+        if (!tc || !tc.alive) throw new Error('该国已不存在');
+        if (core.overlordOf(t) !== me) throw new Error('只能修改我国属国的颜色');
+        if (!Array.isArray(m.rgb) || m.rgb.length < 3) throw new Error('颜色参数不合法');
+        if (!core.setCountryColor(t, m.rgb)) throw new Error('颜色参数不合法');
+        core.pushLog(`🎨 ${tc.name} 的旗色由 ${st.countries[me].name} 改易`, '', me);
+        break;
+      }
+
       case 'revive': {
         const t = +m.target;
         const tc = st.countries[t];
@@ -411,6 +440,7 @@ class Room {
         for (const pid of use) core.transferProvince(pid, t);
         tc.alive = true;
         tc.overlord = me;
+        tc.subject = core.SUBJ_VASSAL;      // 于故土复国 = 普通附庸国
         st.truces[core.truceKey(me, t)] = st.dayCount + 1825;
         core.pushLog(`👑 ${tc.name} 依我朝扶持，于故土复国，奉我为宗主（${use.length}省）`, 'gold', me);
         break;
@@ -508,7 +538,7 @@ class Room {
           core.vassalize(proposer, me);
           break;
         }
-        if (o.indep) st.countries[proposer].overlord = 0;
+        if (o.indep) { st.countries[proposer].overlord = 0; st.countries[proposer].subject = 0; }
         const rels = (o.releases || []).filter(cid => core.overlordOf(cid) === me);
         core.makePeace(w, transfers, true, rels);
         break;
@@ -545,6 +575,7 @@ class Room {
           break;
         }
         st.countries[me].overlord = 0;
+        st.countries[me].subject = 0;
         core.pushLog(`🎌 ${st.countries[me].name} 赢得独立战争，脱离 ${st.countries[enemy].name} 自立！`, 'gold', me);
         core.makePeace(w, [], true);
         break;
@@ -580,6 +611,7 @@ class Room {
        GC 停顿会直接表现为玩家感觉到的"卡一下"，内存也会一路涨。 */
     const base = this.baseline || (this.baseline = {
       prov: new Map(), dev: new Map(), ct: new Map(), army: new Map(), warsSig: null, truceSig: null,
+      countryMeta: null,
     });
     const prov = base.prov, dev = base.dev, ct = base.ct, army = base.army;
     const forced = this.forceArmy;
@@ -603,12 +635,13 @@ class Room {
     for (let i = 1; i < st.countries.length; i++) {
       const c = st.countries[i];
       if (!c) continue;
-      const g = Math.round(c.gold * 10) / 10, mp = Math.round(c.mp), al = c.alive ? 1 : 0, ov = c.overlord || 0;
+      const g = Math.round(c.gold * 10) / 10, mp = Math.round(c.mp), al = c.alive ? 1 : 0,
+            ov = c.overlord || 0, sj = c.subject || 0;
       let row = ct.get(i);
-      if (row === undefined) { row = [0, 0, 0, 0]; ct.set(i, row); }   // 只在第一帧分配
-      if (row[0] !== g || row[1] !== mp || row[2] !== al || row[3] !== ov) {
-        row[0] = g; row[1] = mp; row[2] = al; row[3] = ov;
-        ctOut.push([i, g, mp, al, ov]);
+      if (row === undefined) { row = [0, 0, 0, 0, 0]; ct.set(i, row); }   // 只在第一帧分配
+      if (row[0] !== g || row[1] !== mp || row[2] !== al || row[3] !== ov || row[4] !== sj) {
+        row[0] = g; row[1] = mp; row[2] = al; row[3] = ov; row[4] = sj;
+        ctOut.push([i, g, mp, al, ov, sj]);
       }
     }
 
@@ -724,6 +757,26 @@ class Room {
       }
       if (cn.length) delta.cn = cn;
       base.countryCount = st.countries.length;
+    }
+    /* 国名 / 旗色的改动（改国号、改属国颜色）：只在变动的那一帧发一次。
+       第一帧只建基线不发——玩家加入时本来就会收到整份世界快照。 */
+    if (!base.countryMeta) {
+      base.countryMeta = new Map();
+      for (let i = 1; i < st.countries.length; i++) {
+        const c = st.countries[i];
+        if (c) base.countryMeta.set(i, c.name + '\u0001' + (c.color ? c.color.join(',') : ''));
+      }
+    } else {
+      let cpOut = null;
+      for (let i = 1; i < st.countries.length; i++) {
+        const c = st.countries[i];
+        if (!c) continue;
+        const sig = c.name + '\u0001' + (c.color ? c.color.join(',') : '');
+        if (base.countryMeta.get(i) === sig) continue;
+        base.countryMeta.set(i, sig);
+        (cpOut || (cpOut = [])).push([i, c.name, c.color ? c.color.slice() : null]);
+      }
+      if (cpOut) delta.cp = cpOut;
     }
     if (this.pendingLogs.length) delta.lg = this.pendingLogs.splice(0);
     if (casOut) delta.cas = casOut;

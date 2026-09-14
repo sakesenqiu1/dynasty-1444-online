@@ -377,11 +377,19 @@ function mpDelta(m) {
       if (c.alive !== alive) { c.alive = alive; labelsDirty = true; campsDirty = true; }
       const ov = row[4] || 0;
       if ((c.overlord || 0) !== ov) { c.overlord = ov; campsDirty = true; }
+      // 国体（附庸/傀儡）：只影响外交配色与叛乱倾向，不动阵营
+      const sj = row[5] || 0;
+      if ((c.subject || 0) !== sj) { c.subject = sj; campsDirty = true; }
     }
     /* 联机时客户端不执行任何指令，所以 invalidateCamps 不会被自动调用；
        宗主关系一变就必须在这里手动失效，否则"我方阵营"永远停留在旧值 ——
        表现为附庸占领的省份不出现在割地列表里、附庸关系看着不对。 */
-    if (campsDirty && typeof invalidateCamps === 'function') invalidateCamps();
+    if (campsDirty) {
+      if (typeof invalidateCamps === 'function') invalidateCamps();
+      // 外交模式下宗主/国体一变，地图配色就得跟着变
+      if (mapMode === 'rel') recolorAll();
+      markPanelDirty();
+    }
   }
   if (d.dev) {
     for (const row of d.dev) {
@@ -423,6 +431,19 @@ function mpDelta(m) {
     // 改动的省份多时整体重绘更划算（省掉逐省 setPx 的开销）
     if (d.pr.length > 12) recolorAll();
     else for (const row of d.pr) recolorProvAndNbrs(row[0]);
+  }
+  /* 国名 / 旗色改动（改国号、属国改色）：套用后立刻重算标签，名字当场就能看到 */
+  if (d.cp) {
+    let colorChanged = false;
+    for (const row of d.cp) {
+      const c = countries[row[0]];
+      if (!c) continue;
+      if (typeof row[1] === 'string' && row[1]) { c.name = row[1]; c.enName = row[1]; labelsDirty = true; }
+      if (Array.isArray(row[2]) && row[2].length >= 3) { c.color = row[2].slice(0, 3); colorChanged = true; }
+    }
+    if (colorChanged) recolorAll();
+    if (labelsDirty && typeof rebuildLabels === 'function') rebuildLabels();
+    markPanelDirty();
   }
   if (d.dev && mapMode === 'dev') recolorAll();
   if (d.lg) {

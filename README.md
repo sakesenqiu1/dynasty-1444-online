@@ -17,7 +17,24 @@
 4. 房主点 **开始游戏**
 5. `空格` 暂停/继续，`1`~`5` 调速；按 `P` 打开性能面板
 
-开局后就是标准大战略玩法：内政发展、招募军团（有集结期）、外交结盟、宣战围城、割地求和、册封与吞并附庸、建立自己的附庸国……
+开局后就是标准大战略玩法：内政发展、招募军团（有集结期）、外交结盟、宣战围城、割地求和、册封与吞并附庸、建立自己的傀儡国、给属国改旗色、花钱改国号……
+
+**属国体系（两种国体）**
+
+| 国体 | 怎么来的 | 每月叛乱倾向 |
+|---|---|---|
+| **附庸国** | 战争附庸化 / 花钱册封 / 于故土复国 | 4% |
+| **傀儡国** | 玩家在自己领土上分封建立的新国家 | **0.2%**（附庸的 5%） |
+
+傀儡国的政权、军队、官僚都由宗主一手搭建，所以远比打服或买来的附庸忠诚。
+
+**外交地图配色**（地图模式切到「外交」）
+
+- 我朝与盟友：蓝色
+- 我方附庸国：浅紫
+- 我方傀儡国：深紫
+- 交战：红 / 停战：橙
+- 其余国家（含**他国**的附庸与傀儡）一律中性灰，不作特别表示
 
 **联机规则要点**
 
@@ -26,6 +43,11 @@
 - **附庸造反会真的变成敌对**：可以正常会战、围城、平叛
 - 附庸处于交战状态时不可吞并（原版规则）
 - 断线后重新打开页面、填**同样的名字和房间号**即可接回原局（座位保留 5 分钟）
+
+**自定义外观**
+
+- **给属国改旗色**：外交页展开我方属国 → `🎨 改色`，36 色预设盘 + 随机。免费，纯外观，服务端广播给所有玩家
+- **改自己的国号**：侧栏「王国概览」→ `✏ 修改国名`，花 **200 金**，最多 12 字。名字会随增量同步给所有人，并自动过滤控制字符与尖括号
 
 ---
 
@@ -135,7 +157,7 @@ node tools/run.mjs tools/sh/deploy-https.sh     # 可选：切到 HTTPS
 ## 测试
 
 ```bash
-npm test          # 12 个本地测试，不需要服务器
+npm test          # 16 个本地测试，不需要服务器
 ```
 
 CI 每次提交都会自动跑一遍（见 `.github/workflows/tests.yml`）。
@@ -149,8 +171,10 @@ node tools/test-client-unit.mjs     # 客户端 DOM/内核 单元测试
 node tools/test-perf-unit.mjs       # 渲染调度与性能回归
 node tools/test-map-ghost.mjs       # 地图覆盖不变量（残影回归）
 node tools/test-mp.mjs              # 协议端到端（本地起服务，两个客户端）
+node tools/test-puppet-mp.mjs       # 傀儡国 / 改色 / 改名的协议广播
 node tools/test-recruit-unit.mjs    # 征兵队列
 node tools/test-vassal2-unit.mjs    # 复国 / 建立附庸国
+node tools/test-puppet-unit.mjs     # 傀儡国国体、叛乱倾向、外交配色、改色/改名
 node tools/test-pvp-peace.mjs       # PvP 和谈必须双方同意
 node tools/test-fix3-unit.mjs       # 海路 BFS 与阵营缓存正确性
 node tools/test-fix4-unit.mjs       # 吞并规则与报错可见性
@@ -162,6 +186,7 @@ node tools/test-final.mjs           # HTTPS + wss + 全流程
 node tools/test-jitter.mjs          # 增量间隔抖动与带宽
 node tools/test-recruit-live.mjs    # 征兵集结期线上验证
 node tools/test-vassal-live.mjs     # 建立附庸国线上验证
+node tools/test-puppet-live.mjs     # 傀儡国 / 改色 / 改名线上验证
 node tools/test-pvp-live.mjs        # PvP 和谈线上验证
 node tools/test-load.mjs            # 并发与资源占用
 ```

@@ -172,10 +172,12 @@ function panelSignature(){
   const c=countries[player];
   if(c) s+=Math.round(c.gold*10)+','+Math.round(c.mp)+','+Math.round(c.income*100)+','+c.provList.length+','+(c.alive?1:0)+',';
   if(uiTab==='diplo'){
-    s+=uiSearch+'|'+diploFocus+'|'+wars.length+'|';
+    s+=uiSearch+'|'+diploFocus+'|'+diploColorFor+'|'+wars.length+'|';
     for(let i=1;i<countries.length;i++){
       const q=countries[i]; if(!q){ s+=','; continue; }
-      s+=q.alive?(q.provList.length+'.'+(q.overlord||0)+'.'+(q.allies||[]).length+'.'+Math.round(q.gold)):'x';
+      // 名字/颜色/国体都进指纹：别人改名或改属国颜色后本端要能立刻跟上
+      s+=q.alive?(q.provList.length+'.'+(q.overlord||0)+'.'+(q.allies||[]).length+'.'+Math.round(q.gold)
+        +'.'+(q.subject||0)+'.'+q.name+'.'+(q.color?q.color.join('-'):'')):'x';
       s+=',';
     }
   } else if(uiTab==='war'){
@@ -277,6 +279,32 @@ window.addEventListener('resize',resize); resize();
 function w2s(x,y){ return [(x-cam.x)*cam.z+cw/2,(y-cam.y)*cam.z+ch/2]; }
 function s2w(x,y){ return [(x-cw/2)/cam.z+cam.x,(y-ch/2)/cam.z+cam.y]; }
 
+/* 外交配色（地图外交模式与外交面板共用同一套）
+   我朝与盟友同为蓝色；我方附庸浅紫、我方傀儡深紫；
+   其余国家（含他国的附庸/傀儡）一律中立色，不作特别表示。 */
+const REL_COL={
+  self:   [88,132,198],    // 我朝 / 盟友
+  vassal: [186,140,238],   // 我方附庸国：浅紫
+  puppet: [104,58,168],    // 我方傀儡国：深紫
+  war:    [198,74,62],
+  truce:  [204,156,74],
+  neutral:[106,114,102],
+};
+function relColorOf(cid){
+  if(cid===player) return REL_COL.self;
+  const ov=overlordOf(cid);
+  if(ov===player) return isPuppet(cid)?REL_COL.puppet:REL_COL.vassal;
+  if(atWar(player,cid)) return REL_COL.war;
+  if(isAllied(player,cid)) return REL_COL.self;
+  if(truceBetween(player,cid)) return REL_COL.truce;
+  return REL_COL.neutral;
+}
+/* 外交面板里的色点：有关系时用外交关系色，中立国仍用本国旗色（保留辨识度） */
+function relDotColor(cid){
+  const rc=relColorOf(cid);
+  if(rc===REL_COL.neutral){ const c=countries[cid]; return c&&c.color?c.color:REL_COL.neutral; }
+  return rc;
+}
 function heat(t){
   t=clamp(t,0,1);
   if(t<0.5){ const u=t*2; return [lerp(70,225,u),lerp(150,205,u),lerp(95,80,u)]; }
@@ -286,16 +314,7 @@ function provFill(p){
   if(mapMode==='dev'){ return heat((p.tax+p.prod+p.man-3)/17); }
   if(mapMode==='rel'){
     if(!player) return [110,112,105];
-    const relOf=cid=>{
-      if(cid===player) return [88,132,198];
-      const ov=overlordOf(cid);
-      if(ov===player) return [186,140,238];   // 我方附庸：亮紫
-      if(ov) return [124,96,182];             // 他国附庸：暗紫
-      if(atWar(player,cid)) return [198,74,62];
-      if(truceBetween(player,cid)) return [204,156,74];
-      return [106,114,102];
-    };
-    const r=relOf(p.controller);
+    const r=relColorOf(p.controller);
     return [r[0]*p.varF,r[1]*p.varF,r[2]*p.varF];
   }
   // political：被占领省份保持原主颜色，斜条在 recolorProvince 中叠加
@@ -741,8 +760,8 @@ function renderDiploList(){
   for(const c of list){
     const ov=overlordOf(c.id);
     const isMine=ov===player;
-    // 附庸国特殊颜色：我方附庸亮紫，他国附庸暗紫（与地图外交模式一致）；普通国家用本国颜色
-    const dotCol=isMine?[186,140,238]:(ov?[124,96,182]:c.color);
+    // 色点：我方属国浅紫/深紫、盟友蓝、交战红、停战橙；中立国用本国旗色
+    const dotCol=relDotColor(c.id);
     // 附庸国不可直接宣战（要打就打宗主）；宗主附庸关系另见徽章
     const canWar=!ov&&!atWar(player,c.id)&&!truceBetween(player,c.id);
     const isAlly=isAllied(player,c.id);
@@ -763,13 +782,14 @@ function renderDiploList(){
         : (atWar?'附庸处于交战状态（含随你参战），须先结束所有战事':'吞并附庸全部疆土');
       btns+=`<button class="act" style="margin:0" data-act="annex-vassal" data-v="${c.id}" ${canAnn?'':'disabled'} title="${why}">吞并(${annCost}金)${canAnn?'':' ⚠'}</button> `;
       btns+=`<button class="act" style="margin:0" data-act="release-vassal" data-v="${c.id}" title="放其独立，约定五年之好">解除</button>`;
+      btns+=` <button class="act" style="margin:0" data-act="vassal-color" data-v="${c.id}" title="修改该国在地图上的颜色（免费，全体玩家可见）">🎨 改色</button>`;
     } else if(canDipV){
       btns+=`<button class="act" style="margin:0" data-act="diplo-vassal" data-v="${c.id}" ${me.gold>=dipCost?'':'disabled'} title="岁贡三成收入，随我参战">册封(${dipCost}金)</button>`;
     }
     if(isAlly) btns+=` <button class="act" style="margin:0;background:#1c3320;border-color:#509060;color:#a8e0b0" data-act="diplo-unally" data-v="${c.id}" title="解除盟约">断盟</button>`;
     else if(canAlly) btns+=` <button class="act" style="margin:0;background:#1c3320;border-color:#509060;color:#a8e0b0" data-act="diplo-ally" data-v="${c.id}" title="共同防御：任一方被宣战，另一方参战">结盟</button>`;
     if(canWar) btns+=` <button class="act" style="margin:0" data-act="declare" data-v="${c.id}">宣战</button>`;
-    const open=diploFocus===c.id;
+    const open=diploFocus===c.id||diploColorFor===c.id;
     h+=`<div class="c-row${ov?' vassal':''}${isMine?' my':''}${open?' diplo-open':''}" data-act="diplo-info" data-v="${c.id}" title="${ov?`附庸国，点击查看宗主 ${countries[ov].name}`:'点击查看其附庸'}">
       <span class="cd" style="background:rgb(${dotCol.map(v=>v|0)})"></span>
       <span class="cn">${c.name} ${relationBadge(c.id)}</span>
@@ -778,16 +798,29 @@ function renderDiploList(){
     </div>`;
     if(open){
       let d='';
-      if(ov){ // 点击附庸国 → 显示宗主国是谁
+      if(diploColorFor===c.id) d+=colorPickerHTML(c.id);
+      if(ov){ // 点击属国 → 显示宗主国是谁
         const oc=countries[ov];
-        d+=`<div class="row2"><span class="lbl">宗主国：</span><span class="cd" style="display:inline-block;width:11px;height:11px;background:rgb(${(ov===player?[186,140,238]:oc.color).map(v=>v|0)});border:1px solid #000;vertical-align:middle"></span><b>${oc.name}</b>${relationBadge(ov)}${ov===player?'<span class="hint">（我朝附庸）</span>':'<span class="hint">（其疆土需向宗主宣战方可夺取）</span>'}${ov!==player?`<button class="act" data-act="diplo-focus" data-v="${ov}" title="跳转到宗主国">查看宗主</button>`:''}</div>`;
+        d+=`<div class="row2"><span class="lbl">宗主国：</span><span class="cd" style="display:inline-block;width:11px;height:11px;background:rgb(${relDotColor(oc.id).map(v=>v|0)});border:1px solid #000;vertical-align:middle"></span><b>${oc.name}</b>${relationBadge(ov)}${ov===player?`<span class="hint">（我朝${isPuppet(c.id)?'傀儡':'附庸'}）</span>`:'<span class="hint">（其疆土需向宗主宣战方可夺取）</span>'}${ov!==player?`<button class="act" data-act="diplo-focus" data-v="${ov}" title="跳转到宗主国">查看宗主</button>`:''}</div>`;
       }
-      // 点击宗主国（或有附庸的国家）→ 显示其所有附庸
+      // 点击宗主国（或有属国的国家）→ 显示其所有属国（附庸与傀儡分开列）
       const vas=countries.filter(x=>x&&x.alive&&x.overlord===c.id);
       if(vas.length){
-        d+=`<div class="row2"><span class="lbl">附庸国（${vas.length}）：</span>${vas.map(x=>`<button class="act" data-act="diplo-focus" data-v="${x.id}" title="查看 ${x.name}">${x.name}</button>`).join(' ')}</div>`;
+        const vs=vas.filter(x=>!isPuppet(x.id)), ps=vas.filter(x=>isPuppet(x.id));
+        const part=[];
+        if(vs.length) part.push(`<span class="lbl">附庸国（${vs.length}）：</span>`+
+          vs.map(x=>`<button class="act" data-act="diplo-focus" data-v="${x.id}" title="查看 ${x.name}（附庸国）">${x.name}</button>`).join(' '));
+        if(ps.length) part.push(`<span class="lbl" style="color:#c9a6ff">傀儡国（${ps.length}）：</span>`+
+          ps.map(x=>`<button class="act" style="border-color:#7a4ec0;color:#c9a6ff" data-act="diplo-focus" data-v="${x.id}" title="查看 ${x.name}（傀儡国，叛乱倾向仅 5%）">${x.name}</button>`).join(' '));
+        d+=`<div class="row2" style="display:block">${part.join('</div><div class="row2" style="display:block">')}</div>`;
       } else if(!ov){
-        d+=`<div class="row2"><span class="lbl">附庸国：</span><span class="hint">无</span></div>`;
+        d+=`<div class="row2"><span class="lbl">附属国：</span><span class="hint">无</span></div>`;
+      }
+      // 我方属国：显示国体 + 改色入口
+      if(isMine){
+        d+=`<div class="row2"><span class="lbl">国体：</span><b style="color:${isPuppet(c.id)?'#c9a6ff':'#d0b0ff'}">${isPuppet(c.id)?'傀儡国':'附庸国'}</b>
+          <span class="hint">（${isPuppet(c.id)?'叛乱倾向仅为附庸国的 5%':'叛乱倾向正常'}）</span>
+          <button class="act" data-act="vassal-color" data-v="${c.id}" title="修改该国在地图上的颜色">🎨 修改颜色</button></div>`;
       }
       // 盟友列表
       const als=(c.allies||[]).filter(x=>countries[x]&&countries[x].alive&&x!==player);
@@ -796,7 +829,7 @@ function renderDiploList(){
       } else if(!ov){
         d+=`<div class="row2"><span class="lbl">盟友：</span><span class="hint">无</span></div>`;
       }
-      if(!d) d=`<div class="row2"><span class="lbl">该国家不是附庸，也没有附庸。</span></div>`;
+      if(!d) d=`<div class="row2"><span class="lbl">该国家既无宗主，也没有属国。</span></div>`;
       h+=`<div class="diplo-detail">${d}</div>`;
     }
   }
@@ -827,6 +860,30 @@ function renderDiploList(){
   box.innerHTML=h;
 }
 
+/* ---------- 属国改色盘 ----------
+   36 个预设色（12 色相 × 3 档明度），另加「随机」。
+   改色免费、纯外观，但要经服务端广播给所有玩家。 */
+function colorPickerHTML(cid){
+  const c=countries[cid]; if(!c) return '';
+  const cur=c.color||[180,180,180];
+  const near=(rgb)=>Math.abs(rgb[0]-cur[0])<3&&Math.abs(rgb[1]-cur[1])<3&&Math.abs(rgb[2]-cur[2])<3;
+  let sw='';
+  for(const L of [0.36,0.5,0.64]){
+    for(let i=0;i<12;i++){
+      const rgb=hsl(i/12,0.58,L).map(v=>Math.round(v));
+      sw+=`<button class="sw${near(rgb)?' sel':''}" data-act="vcolor-set" data-v="${cid}" data-rgb="${rgb.join(',')}" style="background:rgb(${rgb.join(',')})" title="rgb(${rgb.join(',')})"></button>`;
+    }
+  }
+  return `<div class="row2" style="display:block">
+    <span class="lbl">修改 ${c.name} 的颜色：</span>
+    <div class="swatches">${sw}</div>
+    <div style="margin-top:6px;display:flex;gap:5px;align-items:center">
+      <button class="act" data-act="vcolor-random" data-v="${cid}" title="随机挑一个颜色">🎲 随机</button>
+      <button class="act" data-act="vcolor-close" title="收起调色板">收起</button>
+      <span class="hint">当前 <span style="display:inline-block;width:11px;height:11px;background:rgb(${cur.map(v=>v|0)});border:1px solid #000;vertical-align:middle"></span> rgb(${cur.map(v=>v|0).join(',')}) · 免费，所有玩家立刻可见</span>
+    </div>
+  </div>`;
+}
 function infoTab(){
   let h='';
   const a=armies.find(x=>x.id===selectedArmy);
@@ -884,20 +941,20 @@ function infoTab(){
       h+=`<div>
         <button class="act" style="background:#1a2c3e;border-color:#5080b0;color:#aae0ff" data-act="recruit-navy" data-v="${p.id}" ${canNavyRec?'':'disabled'} ${isCoast?`title="组建周期 ${Math.round(NAVY_DAYS/30)} 个月"`:'title="该省无海岸"'} >${isCoast?`组建舰队（35金+4k人力 · ${Math.round(NAVY_DAYS/30)}个月下水）`:'该省无海岸'}</button>
       </div>`;
-      // 建立附庸国：以该省为首都，分封一个自命名的新国家
+      // 建立傀儡国：以该省为首都，分封一个自命名的新国家
       if(!overlordOf(player)&&c.provList.length>1&&p.controller===player){
-        h+=`<div><button class="act" style="background:#2a2440;border-color:#6a5a9a;color:#d0b0ff" data-act="found-vassal" data-v="${p.id}" title="以该省为首都，分封一个由你命名的新附庸国（之后可用「赐地」继续给它扩充领土）">🏳 建立附庸国</button></div>`;
+        h+=`<div><button class="act" style="background:#2a2440;border-color:#6a5a9a;color:#d0b0ff" data-act="found-vassal" data-v="${p.id}" title="以该省为首都，分封一个由你命名的新傀儡国：国体为傀儡国，叛乱倾向只有附庸国的 5%（之后可用「赐地」继续给它扩充领土）">🏳 建立傀儡国</button></div>`;
       }
-      // 赠地给附庸：将该省交给指定小弟
+      // 赠地给属国：将该省交给指定小弟
       const myVass=countries.filter(x=>x&&x.alive&&x.overlord===player);
       if(myVass.length){
         const canGive=p.controller===player&&c.provList.length>1;
         h+=`<div style="margin-top:4px;display:flex;gap:4px;align-items:center;flex-wrap:wrap">
-          <span class="hint" style="white-space:nowrap">赠予附庸：</span>
+          <span class="hint" style="white-space:nowrap">赠予属国：</span>
           <select id="give-sel" style="background:#1c2430;color:#d8d0c0;border:1px solid #607080;border-radius:3px;padding:2px 4px;font-size:12px;max-width:150px">
             ${myVass.map(x=>`<option value="${x.id}">${x.name}（${x.provList.length}省）</option>`).join('')}
           </select>
-          <button class="act" data-act="give-vassal" data-v="${p.id}" ${canGive?'':'disabled'} title="将该省的所有权交给所选附庸国">赐地</button>
+          <button class="act" data-act="give-vassal" data-v="${p.id}" ${canGive?'':'disabled'} title="将该省的所有权交给所选属国">赐地</button>
         </div>`;
       }
     }
@@ -907,6 +964,7 @@ function infoTab(){
   if(player){
     const c=countries[player];
     h+=`<h3>${c.name} · 王国概览</h3>
+      <div><button class="act" data-act="rename-self" ${c.gold<RENAME_COST?'disabled':''} title="${c.gold<RENAME_COST?`国库不足（需 ${RENAME_COST} 金，现有 ${Math.round(c.gold)}）`:`花费 ${RENAME_COST} 金，改易国号（最多 ${RENAME_MAX} 字），全体玩家立刻可见`}">✏ 修改国名（${RENAME_COST}金）</button></div>
       <div class="row"><span>发展度总和</span><b>${totalDev(c)}</b></div>
       <div class="row"><span>省份</span>${c.provList.length}</div>`;
     {
@@ -940,7 +998,11 @@ function relationBadge(cid){
   if(cid===player) return '<span class="badge self">本国</span>';
   // 交战中优先：造反的附庸不能再显示成"我朝附庸"
   if(atWar(player,cid)) return '<span class="badge war">交战中</span>';
-  if(overlordOf(cid)===player) return '<span class="badge vassal">我朝附庸</span>';
+  if(overlordOf(cid)===player){
+    return isPuppet(cid)
+      ? '<span class="badge vassal" style="background:#2a1a48;border-color:#7a4ec0;color:#c9a6ff">我朝傀儡</span>'
+      : '<span class="badge vassal">我朝附庸</span>';
+  }
   if(overlordOf(player)===cid) return '<span class="badge suz">宗主</span>';
   if(truceBetween(player,cid)){
     const t=truces[truceKey(player,cid)];
@@ -1112,6 +1174,11 @@ document.addEventListener('click',e=>{
     case 'annex-vassal': annexVassal(+v); break;
     case 'release-vassal': releaseVassal(+v); break;
     case 'give-vassal': { const sel=$('give-sel'); giveProvinceToVassal(+v, sel?+sel.value:0); break; }
+    case 'vassal-color': toggleVassalColor(+v); break;
+    case 'vcolor-set': setVassalColor(+v, String(el.dataset.rgb||'').split(',').map(Number)); break;
+    case 'vcolor-random': setVassalColor(+v, hsl(Math.random(),0.58,0.5).map(x=>Math.round(x))); break;
+    case 'vcolor-close': diploColorFor=0; refreshPanel(); break;
+    case 'rename-self': renameSelf(); break;
     case 'diplo-info': diploFocus=diploFocus===+v?0:+v; refreshPanel(); break;
     case 'diplo-focus': diploFocus=+v; refreshPanel(); break;
     case 'peace-ask': peaceAsk(+v); break;
@@ -1282,6 +1349,7 @@ function offerAccept(){
   const w=pendingOffer.war, enemy=pendingOffer.enemy;
   if(pendingOffer.indep){
     countries[enemy].overlord=0;
+    countries[enemy].subject=0;
     pushLog(`🎌 ${countries[enemy].name} 重获独立！`,'gold');
   }
   const rels=(pendingOffer.releases||[]).filter(cid=>overlordOf(cid)===player);
@@ -1341,6 +1409,7 @@ function peaceIndep(enemy){
   for(const cid of rels) cost+=releaseCost(countries[cid]);
   if(cost>mine*0.95+0.01){ pushLog('战争分数不足（独立30分+割地/释放附庸费用）','war'); return; }
   countries[player].overlord=0;
+  countries[player].subject=0;
   pushLog(`🎌 ${countries[player].name} 赢得独立战争，脱离 ${countries[enemy].name} 自立！${checked.length?`并割让 ${checked.length} 个省份`:''}${rels.length?`，${rels.length} 个附庸同获自由`:''}`,'gold');
   makePeace(w,checked.map(pid=>({pid,to:player})),true,rels);
   labelsDirty=true;
@@ -1354,7 +1423,7 @@ function diploVassal(cid){
   if(!vassalReachable(player,cid)){ pushLog(`${t.name} 与我朝既不接壤亦非近海，无法册封`,'war'); return; }
   const cost=Math.round(60+totalDev(t)*2);
   if(me.gold<cost){ pushLog('国库不足，无法册封','war'); return; }
-  me.gold-=cost; t.overlord=player;
+  me.gold-=cost; t.overlord=player; t.subject=SUBJ_VASSAL;
   clearAllAlliances(cid); // 附庸不得另有盟约
   truces[truceKey(player,cid)]=dayCount+3650;
   pushLog(`👑 ${t.name} 接受册封，岁贡三成，为我藩篱`,'gold');
@@ -1371,9 +1440,9 @@ function annexVassal(cid){
   // 被吞并国的附庸转奉我为宗主（继承其整个藩属体系），须在转移省份前处理，
   // 否则最后一省移走会触发 checkDeath 把附庸放独立
   const inherited=countries.filter(vc=>vc&&vc.alive&&vc.overlord===cid);
-  for(const vc of inherited) vc.overlord=player;
+  for(const vc of inherited) vc.overlord=player;   // 沿用各自原有国体
   for(const pid of [...t.provList]) transferProvince(pid,player);
-  t.overlord=0;
+  t.overlord=0; t.subject=0;
   pushLog(`👑 ${t.name} 王祚断绝，疆土尽入我朝`,'gold');
   for(const vc of inherited) pushLog(`👑 ${vc.name} 转奉我朝为主，为我藩属`,'gold');
   labelsDirty=true;
@@ -1384,7 +1453,7 @@ function releaseVassal(cid){
   if(MP.online) return mpCmd({c:'release',target:cid});
   const t=countries[cid];
   if(overlordOf(cid)!==player) return;
-  t.overlord=0;
+  t.overlord=0; t.subject=0;
   truces[truceKey(player,cid)]=dayCount+1825;
   pushLog(`${t.name} 重获独立，与我朝约定五年之好`,'');
   labelsDirty=true; refreshPanel();
@@ -1400,6 +1469,38 @@ function giveProvinceToVassal(pid,vid){
   transferProvince(pid,vid);
   pushLog(`👑 ${p.name} 赐予 ${vc.name}，以为藩屏`,'gold');
   labelsDirty=true; refreshPanel();
+}
+/* ---------- 属国改色（免费，纯外观；联机时经服务端广播） ---------- */
+function toggleVassalColor(cid){
+  diploColorFor = diploColorFor===cid ? 0 : cid;
+  if(diploColorFor) diploFocus=cid;
+  refreshPanel();
+}
+function setVassalColor(cid, rgb){
+  if(MP.online) return mpCmd({c:'recolor',target:cid,rgb});
+  const t=countries[cid];
+  if(!t||!t.alive){ pushLog('该国已不存在','war'); return; }
+  if(overlordOf(cid)!==player){ pushLog('只能修改我国属国的颜色','war'); return; }
+  if(!setCountryColor(cid,rgb)){ pushLog('颜色不合法','war'); return; }
+  recolorAll(); rebuildLabels();
+  pushLog(`🎨 ${t.name} 的旗色已改为 rgb(${rgb.map(v=>v|0).join(',')})`,'');
+  refreshPanel();
+}
+/* ---------- 修改自己的国名（RENAME_COST 金） ---------- */
+function renameSelf(){
+  const c=countries[player];
+  if(!c||!c.alive) return;
+  if(c.gold<RENAME_COST){ pushLog(`国库不足，改易国号需 ${RENAME_COST} 金（现有 ${Math.round(c.gold)}）`,'war'); return; }
+  const raw=prompt(`改易国号（最多 ${RENAME_MAX} 字，需 ${RENAME_COST} 金）：`, c.name);
+  if(raw===null) return;
+  const name=sanitizeCountryName(raw);
+  if(!name){ pushLog('国号不能为空','war'); return; }
+  if(name===c.name){ pushLog('新国号与旧国号相同',''); return; }
+  if(MP.online) return mpCmd({c:'rename',name});
+  if(!setCountryName(player,name)){ pushLog('改易国号失败','war'); return; }
+  c.gold-=RENAME_COST;
+  rebuildLabels(); refreshPanel();
+  pushLog(`✏ 国号已改为「${name}」（耗 ${RENAME_COST} 金）`,'gold');
 }
 // 外交结盟（玩家发起）：共同防御——盟友被宣战时我朝参战，反之亦然
 function diploAlliance(cid){
@@ -1452,6 +1553,7 @@ function reviveNation(cid){
   for(const pid of bestComp){ const L=provinces[pid].pix.length; if(L>capLen){capLen=L;cap=pid;} }
   t.alive=true;
   t.overlord=player;
+  t.subject=SUBJ_VASSAL;      // 于故土复国 = 普通附庸国
   t.gold=Math.max(t.gold||0,25);
   t.mp=Math.max(t.mp||0,3000);
   t.allies=[];

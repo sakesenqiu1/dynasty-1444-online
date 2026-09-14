@@ -13,7 +13,7 @@
   "scripts": {
     "postinstall": "npm --prefix srv install --omit=optional --no-audit --no-fund",
     "start": "node srv/server.js",
-    "test": "node tools/test-core.mjs && node tools/test-client-unit.mjs && node tools/test-perf-unit.mjs && node tools/test-map-ghost.mjs && node tools/test-recruit-unit.mjs && node tools/test-vassal2-unit.mjs && node tools/test-pvp-peace.mjs && node tools/test-fix3-unit.mjs && node tools/test-fix4-unit.mjs && node tools/test-fix5-unit.mjs && node tools/test-newcountry-label.mjs && node tools/test-mp.mjs",
+    "test": "node tools/test-core.mjs && node tools/test-client-unit.mjs && node tools/test-perf-unit.mjs && node tools/test-map-ghost.mjs && node tools/test-recruit-unit.mjs && node tools/test-vassal2-unit.mjs && node tools/test-puppet-unit.mjs && node tools/test-pvp-peace.mjs && node tools/test-fix3-unit.mjs && node tools/test-fix4-unit.mjs && node tools/test-fix5-unit.mjs && node tools/test-newcountry-label.mjs && node tools/test-mp.mjs && node tools/test-puppet-mp.mjs",
     "test:live": "node tools/test-final.mjs",
     "bench": "node tools/profile-server.mjs"
   }

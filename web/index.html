@@ -67,6 +67,11 @@ canvas#map.dragging{cursor:grabbing}
 .diplo-detail .row2{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .diplo-detail .lbl{color:#a89a7c}
 .diplo-detail button.act{padding:2px 8px;font-size:11px;margin:2px 4px 2px 0}
+/* 属国改色调色板 */
+.swatches{display:grid;grid-template-columns:repeat(12,1fr);gap:3px;margin:5px 0 0;max-width:340px}
+.swatches .sw{width:100%;aspect-ratio:1/1;min-width:14px;border:1px solid #000;border-radius:2px;cursor:pointer;padding:0}
+.swatches .sw:hover{outline:2px solid #ffe9b0;outline-offset:1px}
+.swatches .sw.sel{outline:2px solid #fff;outline-offset:1px;box-shadow:0 0 5px #fff}
 .warbar{height:8px;background:#20140f;border:1px solid #5a3a2a;position:relative;margin:4px 0;border-radius:2px;overflow:hidden}
 .warbar .fill{position:absolute;top:0;bottom:0}
 .sep{border-top:1px solid #3a3222;margin:8px 0}

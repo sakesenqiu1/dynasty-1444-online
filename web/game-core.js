@@ -60,7 +60,7 @@ let cal={y:1444,m:10,d:11};
 let paused=true, speed=2;
 let mapMode='political';
 let selectedProv=0, selectedArmy=0;
-let uiTab='info', uiSearch='', diploFocus=0;
+let uiTab='info', uiSearch='', diploFocus=0, diploColorFor=0;   // diploColorFor: 正在为其选颜色的属国
 let pendingOffers={};             // cid -> 该国玩家当前待决的敌方和约提案
 let labelsDirty=true;
 let battleProvs=new Set();
@@ -279,7 +279,7 @@ function buildCountries(cidMap,feats){
     countries.push({id:c, featId:f.id, name:ZH_NAMES[f.id]||f.name, enName:f.name,
       color:hsl((hash32(c*2654435761)%360)/360,0.46,0.5),
       ruler:RULERS[ri(RULERS.length)]+ROMAN[ri(6)],
-      gold:0, mp:0, mpCap:0, income:0, provList:[], capital:0, alive:false, lx:0, ly:0, overlord:0, allies:[]});
+      gold:0, mp:0, mpCap:0, income:0, provList:[], capital:0, alive:false, lx:0, ly:0, overlord:0, subject:0, allies:[]});
   }
   // 东番（台湾）并入大明：1444年岛上并无政权，部族之地直属明廷海疆
   // 索马里兰（无ISO代码子区域）并入索马里诸部
@@ -368,6 +368,29 @@ function rebuildLabels(){
    三、游戏逻辑
    ===================================================================== */
 function overlordOf(cid){ const c=countries[cid]; return c&&c.overlord&&countries[c.overlord]&&countries[c.overlord].alive?c.overlord:0; }
+/* ---------- 属国类型（国体） ----------
+   SUBJ_VASSAL 附庸国：战争附庸化 / 花钱册封 / 于故土复国 —— 常规藩属
+   SUBJ_PUPPET 傀儡国：玩家亲自分封建立的新国家 —— 政权完全由宗主搭建，
+                        叛乱倾向只有附庸国的 5%                                */
+const SUBJ_VASSAL=1, SUBJ_PUPPET=2;
+const PUPPET_REBEL_MUL=0.05;   // 傀儡国叛乱倾向倍率
+/* 属国类型（国体）：无宗主一律算独立，老存档没这个字段时按附庸国处理 */
+function subjectOf(cid){
+  const c=countries[cid];
+  if(!c||!overlordOf(cid)) return 0;
+  return c.subject||SUBJ_VASSAL;
+}
+function isPuppet(cid){ return subjectOf(cid)===SUBJ_PUPPET; }
+/* 每月举兵造反的概率：附庸国 4%，傀儡国只有它的 5%（0.2%） */
+const REBEL_BASE=0.04;
+function rebelChanceOf(cid){ return REBEL_BASE*(isPuppet(cid)?PUPPET_REBEL_MUL:1); }
+/* 变更宗主关系时统一走这里，保证 overlord 与 subject 永远同步 */
+function setOverlord(cid, ovId, subj){
+  const c=countries[cid]; if(!c) return;
+  c.overlord=ovId||0;
+  c.subject=c.overlord?(subj||SUBJ_VASSAL):0;
+  invalidateCamps();
+}
 /* ---------- 盟友体系 ---------- */
 function isAllied(a,b){
   if(a===b) return false;
@@ -1027,7 +1050,9 @@ function aiMonthly(){
     let vassalDev=0;
     for(const v2 of countries) if(v2&&v2.alive&&v2.overlord===vc.overlord) vassalDev+=totalDev(v2);
     if(vassalDev<totalDev(ov)) continue;
-    if(rnd()<0.04){
+    // 傀儡国政权由宗主一手搭建（军队、官僚皆出自我朝），叛乱倾向只有附庸国的 5%
+    const rebelChance=rebelChanceOf(vc.id);
+    if(rnd()<rebelChance){
       declareWar(vc.id,vc.overlord);
       if(!pushLogTo([vc.overlord],`⚔ ${vc.name} 举兵造反，要求脱离我国独立！`,'war'))
         pushLogWorld(`边关急报：${vc.name} 起兵反抗宗主 ${ov.name}`,'war',[vc.id,vc.overlord],true);
@@ -1047,7 +1072,7 @@ function aiMonthly(){
       if(months>6&&(Math.abs(s.a-s.d)>15||months>36)){
         if(winA){
           // 附庸赢：解除臣属 + 剩余分数按普通割地模式割宗主的地
-          countries[w.a].overlord=0; invalidateCamps();
+          countries[w.a].overlord=0; countries[w.a].subject=0; invalidateCamps();
           const transfers=[]; const taken=new Set(); let cost=30;
           const candidates=[];
           for(let i=1;i<provinces.length;i++){
@@ -1462,7 +1487,7 @@ function makePeace(w,transfers,byPlayer,releases){
       const vc=countries[cid];
       if(!vc||!vc.alive||(vc.overlord!==w.a&&vc.overlord!==w.d)) continue;
       const oldOv=vc.overlord;
-      vc.overlord=0; invalidateCamps();
+      vc.overlord=0; vc.subject=0; invalidateCamps();
       // 终结该附庸直接参与的其他战争（含其对旧宗主的独立战争——目标已达成）
       for(const w2 of [...wars]) if(w2&&typeof w2.a==='number'&&(w2.a===cid||w2.d===cid)) makePeace(w2,[],false);
       truces[truceKey(cid,oldOv)]=dayCount+3650;
@@ -1504,6 +1529,7 @@ function foundVassal(overlord, capitalPid, name){
   // 新附庸不算"故土"，把这条记录抹掉，免得日后宗主亡国时误判
   if(p.former) p.former=p.former.filter(x=>x!==overlord);
   nc.overlord=overlord;
+  nc.subject=SUBJ_PUPPET;      // 玩家亲手分封 → 傀儡国（叛乱倾向仅 5%）
   recomputeCap(nc);
   invalidateCamps();
   return id;
@@ -1587,9 +1613,38 @@ function vassalize(winner,loser){
   }
   makePeace(w,[],isHuman(winner)||isHuman(loser));
   clearAllAlliances(loser); // 附庸不得另有盟约
-  countries[loser].overlord=winner; invalidateCamps();
+  countries[loser].overlord=winner; countries[loser].subject=SUBJ_VASSAL; invalidateCamps();
   pushLog(`👑 ${countries[loser].name} 向 ${countries[winner].name} 屈膝称臣，成为附庸`,'gold');
   labelsDirty=true; UI.panel();
+}
+
+/* ---------- 玩家自定义：改国名 / 改属国颜色 ----------
+   两者都是服务端权威的状态改动：服务端改完用 cp 增量广播，各客户端直接套用。
+   单人模式下客户端本地直接调这两个函数。 */
+const RENAME_MAX=12;          // 国名字数上限
+const RENAME_COST=200;        // 改国名花费（金）
+function sanitizeCountryName(raw){
+  return String(raw==null?'':raw).replace(/[\u0000-\u001f<>]/g,'').trim().slice(0,RENAME_MAX);
+}
+function setCountryName(cid, name){
+  const c=countries[cid]; if(!c||!c.alive) return false;
+  const nm=sanitizeCountryName(name);
+  if(!nm) return false;
+  c.name=nm; c.enName=nm;
+  labelsDirty=true;
+  return true;
+}
+function setCountryColor(cid, rgb){
+  const c=countries[cid]; if(!c) return false;
+  if(!Array.isArray(rgb)||rgb.length<3) return false;
+  const out=[];
+  for(let i=0;i<3;i++){
+    const v=Math.round(+rgb[i]);
+    if(!isFinite(v)) return false;
+    out.push(Math.max(0,Math.min(255,v)));
+  }
+  c.color=out;
+  return true;
 }
 
 /* ---------- 供服务端 / 客户端共用的世界初始化与控制接口 ---------- */
@@ -1626,8 +1681,8 @@ function makeSaveData(){
       ?[p.owner,p.controller,p.tax,p.prod,p.man,p.former.slice()]
       :[p.owner,p.controller,p.tax,p.prod,p.man]),
     ct:countries.slice(1).map(c=>c?(c.featId==='CUSTOM'
-      ?{a:c.alive?1:0,g:Math.round(c.gold*10)/10,mp:Math.round(c.mp),r:c.ruler,ov:c.overlord||0,al:(c.allies||[]).slice(),n:c.name,col:c.color,cap:c.capital}
-      :{a:c.alive?1:0,g:Math.round(c.gold*10)/10,mp:Math.round(c.mp),r:c.ruler,ov:c.overlord||0,al:(c.allies||[]).slice()}):null),
+      ?{a:c.alive?1:0,g:Math.round(c.gold*10)/10,mp:Math.round(c.mp),r:c.ruler,ov:c.overlord||0,al:(c.allies||[]).slice(),n:c.name,col:c.color,cap:c.capital,sj:c.subject||0}
+      :{a:c.alive?1:0,g:Math.round(c.gold*10)/10,mp:Math.round(c.mp),r:c.ruler,ov:c.overlord||0,al:(c.allies||[]).slice(),sj:c.subject||0}):null),
     arm:armies.map(a=>({i:a.id,o:a.owner,p:a.prov,s:Math.round(a.str),n:a.isNavy?1:0})),
     rec:recruits.map(r=>({i:r.id,o:r.owner,p:r.prov,s:r.str,n:r.isNavy?1:0,d:r.days,t:r.total,st:r.start})),
     nextRecruit,
@@ -1647,11 +1702,12 @@ function applySaveData(d){
       // 世界生成时不存在的国家 = 玩家自建的附庸，按存档里的描述补建出来
       if(!a.n) return;
       c={ id, featId:'CUSTOM', name:a.n, enName:a.n, color:(a.col||[180,180,180]).slice(), capital:a.cap||0,
-          provList:[], alive:true, gold:0, mp:0, mpCap:0, forceLimit:0, overlord:0, allies:[], ruler:'', lx:0, ly:0 };
+          provList:[], alive:true, gold:0, mp:0, mpCap:0, forceLimit:0, overlord:0, subject:0, allies:[], ruler:'', lx:0, ly:0 };
       while(countries.length<id) countries.push(null);
       countries[id]=c;
     }
-    c.alive=!!a.alive||!!a.a; c.gold=a.g; c.mp=a.mp; c.ruler=a.r; c.overlord=a.ov||0;
+    c.alive=!!a.alive||!!a.a; c.gold=a.g; c.mp=a.mp; c.ruler=a.r;
+    c.overlord=a.ov||0; c.subject=c.overlord?(a.sj||SUBJ_VASSAL):0;
     c.allies=(a.al||[]).filter(x=>x&&countries[x]&&countries[x].alive);
   });
   for(let c=1;c<countries.length;c++) if(countries[c]) countries[c].provList=[];
@@ -1689,7 +1745,7 @@ function checkDeath(cid){
   const c=countries[cid];
   if(c.alive&&c.provList.length===0){
     c.alive=false;
-    c.overlord=0;
+    c.overlord=0; c.subject=0;
     invalidateCamps();
     clearAllAlliances(cid); // 亡国后其盟约全部作废
     armies=armies.filter(a=>a.owner!==cid);
@@ -1702,7 +1758,7 @@ function checkDeath(cid){
     }
     // 宗主灭亡，附庸重获独立
     for(const vc of countries){
-      if(vc&&vc.overlord===cid){ vc.overlord=0; invalidateCamps(); pushLogWorld(`${vc.name} 随宗主灭亡而重获独立`,'',[vc.id,cid],true); }
+      if(vc&&vc.overlord===cid){ vc.overlord=0; vc.subject=0; invalidateCamps(); pushLogWorld(`${vc.name} 随宗主灭亡而重获独立`,'',[vc.id,cid],true); }
     }
     pushLog(`☠ ${c.name} 灭亡，宗庙倾覆`,'war',0);
     if(isHuman(cid)) UI.defeat(cid);
@@ -1722,6 +1778,9 @@ if(typeof module!=='undefined'&&module.exports){
     declareWar,makePeace,transferProvince,checkDeath,vassalize,
     warScore,peaceCost,releaseCost,canDemandProvince,occRatio,atWar,inWar,truceBetween,truceKey,
     overlordOf,isAllied,formAlliance,breakAlliance,clearAllAlliances,campOf,vassalsAllOf,
+    subjectOf,isPuppet,setOverlord,SUBJ_VASSAL,SUBJ_PUPPET,PUPPET_REBEL_MUL,
+    REBEL_BASE,rebelChanceOf,
+    setCountryName,setCountryColor,sanitizeCountryName,RENAME_MAX,RENAME_COST,
     findPath,findNavalPath,bfsHome,bfsSetFrom,homeDistMap,countryStrength,
     countriesAdjacent,seaAdjacent,vassalReachable,directWar,isFrontProv,attritionMonthly,
     provinces:()=>provinces, countries:()=>countries, armies:()=>armies,
