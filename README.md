@@ -199,6 +199,7 @@ node tools/test-load.mjs            # 并发与资源占用
 node tools/profile-server.mjs                       # 逐日 / 月度结算耗时分布
 node --cpu-prof --cpu-prof-dir=prof tools/sim-for-prof.mjs
 node tools/analyze-prof.mjs prof                    # CPU 采样热点排序
+node tools/bench-delta-scan.mjs                     # 增量扫描循环的微基准
 ```
 
 ---
