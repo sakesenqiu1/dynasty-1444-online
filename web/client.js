@@ -403,11 +403,12 @@ const cctx=cedeCv.getContext('2d');
 let cedeData=cctx.createImageData(COLS,ROWS);
 let cedeDirty=false;
 let cedeMap={on:false,enemy:0};
-/* ---------- 分封地图（一次性划地建立傀儡国） ----------
+/* ---------- 划地模式（分封新傀儡国 / 给已有属国赐地，共用同一套地图交互） ----------
    原来的流程是「先点一省建国，再一个省一个省按『赐地』」，划一片封地要点几十次。
-   现在：点「🏳 划地分封」→ 输国号 → 进地图模式 → 在自己实际控制的省份上随便点选
-   （金色=已选，亮金=首府，淡绿=可以接着选），最后一次性建国。 */
-let grantMap={on:false,pids:new Set(),capital:0,name:''};
+   现在两种用途都走地图：点「🏳 划地分封」或「🎁 划地赐予」→ 进地图模式 →
+   在自己实际控制的省份上随便点选（金色=已选，亮金=首府，淡绿=可以接着选），
+   最后一次性落地。mode='found' 建立新傀儡国，mode='give' 把地划给已有属国。 */
+let grantMap={on:false,pids:new Set(),capital:0,name:'',mode:'found',target:0};
 function grantMapCanPick(pid){
   const p=provinces[pid];
   if(!p||!p.pix.length) return false;
@@ -433,27 +434,29 @@ function paintCedeOverlay(){
     const near=new Set();
     for(const pid of grantMap.pids){
       const p=provinces[pid]; if(!p) continue;
-      paint(pid, pid===grantMap.capital?[255,235,130,205]:[255,170,45,175]);
+      paint(pid, (grantMap.mode==='found'&&pid===grantMap.capital)?[255,235,130,205]:[255,170,45,175]);
       for(const q of p.nbrs) if(!grantMap.pids.has(q)&&grantMapCanPick(q)) near.add(q);
     }
     for(const q of near) paint(q,[120,225,140,62]);
   }
   cedeDirty=true;
 }
-/* 分封地图底部操作条：只重画这一条，不整块刷新侧栏（侧栏有 180 个国家，很贵） */
+/* 底部操作条：只重画这一条，不整块刷新侧栏（侧栏有 180 个国家，很贵） */
 function updateGrantBar(){
   const bar=$('grantbar'); if(!bar) return;
   if(!grantMap.on){ bar.classList.add('hidden'); bar.innerHTML=''; return; }
   const n=grantMap.pids.size;
   const me=countries[player];
   const left=me?me.provList.length-n:0;
+  const isFound=grantMap.mode==='found';
   const capName=grantMap.capital&&provinces[grantMap.capital]?provinces[grantMap.capital].name:'—';
+  const noLeft=left<=0;
   bar.classList.remove('hidden');
-  bar.innerHTML=`<b style="color:#ffd890">🏳 分封《${escHtml(grantMap.name)}》</b>
-    <span class="hint">已选 <b style="color:#ffd070">${n}</b> 省 · 首府 <b style="color:#ffe9b0">${escHtml(capName)}</b> · 我国余 ${left} 省</span>
-    <button class="act" data-act="grant-absorb" title="把与已选疆土接壤、且仍在我国实际控制下的省份全部纳入封地">＋纳入接壤省</button>
+  bar.innerHTML=`<b style="color:#ffd890">${isFound?'🏳 分封':'🎁 赐地给'}《${escHtml(grantMap.name)}》</b>
+    <span class="hint">已选 <b style="color:#ffd070">${n}</b> 省${isFound?` · 首府 <b style="color:#ffe9b0">${escHtml(capName)}</b>`:''} · 我国余 ${left} 省</span>
+    <button class="act" data-act="grant-absorb" title="把与已选疆土接壤、且仍在我国实际控制下的省份全部纳入">＋纳入接壤省</button>
     <button class="act" data-act="grant-clear" title="清空已选">清空</button>
-    <button class="act" style="background:#2a2440;border-color:#6a5a9a;color:#d0b0ff" data-act="grant-confirm" ${n&&left>0?'':'disabled'} title="${left<=0?'至少要为我国保留一个省份':'一次划地建立傀儡国'}">✔ 确认分封（${n}省）</button>
+    <button class="act" style="background:#2a2440;border-color:#6a5a9a;color:#d0b0ff" data-act="grant-confirm" ${n&&!noLeft?'':'disabled'} title="${noLeft?'至少要为我国保留一个省份':(isFound?'一次划地建立傀儡国':'一次把这些省份划给该属国')}">✔ ${isFound?'确认分封':'确认赐地'}（${n}省）</button>
     <button class="act" data-act="grant-cancel">取消</button>
     <span class="hint" style="margin-left:6px">点地图上的省份可加入/移出；点已选省份可取消该省</span>`;
 }
@@ -498,24 +501,55 @@ function grantMapToggle(pid){
   return true;
 }
 function grantMapBegin(pid,name){
-  const p=provinces[pid];
-  grantMap={on:true,pids:new Set([pid]),capital:pid,name};
+  grantMap={on:true,pids:new Set([pid]),capital:pid,name,mode:'found',target:0};
   cedeMap.on=false; cedeMap.enemy=0;
   paintCedeOverlay(); updateGrantBar();
   pushLog(`🏳 分封《${name}》：在地图上点选要封出去的省份（可点「＋纳入接壤省」整片划），选好后点「确认分封」`,'gold');
 }
+/* 划地赐予已有属国：与分封同一套交互，只是落地时把地转给已存在的国家 */
+function grantMapBeginGive(pid,targetId){
+  const t=countries[targetId];
+  if(!t||!t.alive){ pushLog('请先选择一个属国','war'); return; }
+  if(overlordOf(targetId)!==player){ pushLog(`《${t.name}》不是我国属国`,'war'); return; }
+  const p=provinces[pid];
+  if(!p||p.owner!==player||p.controller!==player){ pushLog('只能划出你自己实际控制的省份','war'); return; }
+  if(countries[player].provList.length<=1){ pushLog('至少要为我国保留一个省份','war'); return; }
+  grantMap={on:true,pids:new Set([pid]),capital:0,name:t.name,mode:'give',target:targetId};
+  cedeMap.on=false; cedeMap.enemy=0;
+  paintCedeOverlay(); updateGrantBar();
+  pushLog(`🎁 划地赐予《${t.name}》：在地图上点选要划过去的省份（可点「＋纳入接壤省」整片划），选好后点「确认赐地」`,'gold');
+}
 function grantMapCancel(){
-  grantMap={on:false,pids:new Set(),capital:0,name:''};
+  grantMap={on:false,pids:new Set(),capital:0,name:'',mode:'found',target:0};
   paintCedeOverlay(); updateGrantBar();
 }
 function grantMapConfirm(){
   if(!grantMap.on) return;
   const pids=[...grantMap.pids];
   if(!pids.length){ pushLog('还没有选择任何省份','war'); return; }
-  const name=grantMap.name;
-  const cap=grantMap.capital&&grantMap.pids.has(grantMap.capital)?grantMap.capital:pids[0];
   const me=countries[player];
   if(!me||me.provList.length<=pids.length){ pushLog('至少要为我国保留一个省份','war'); return; }
+
+  /* ---- 赐地给已有属国 ---- */
+  if(grantMap.mode==='give'){
+    const vid=grantMap.target, t=countries[vid];
+    if(!t||!t.alive||overlordOf(vid)!==player){ pushLog('对方已不是我国属国','war'); grantMapCancel(); return; }
+    if(MP.online){ mpCmd({c:'give',to:vid,pids}); grantMapCancel(); return; }
+    let n=0;
+    for(const pid of pids){
+      const p=provinces[pid];
+      if(p&&p.pix.length&&p.owner===player&&p.controller===player){ transferProvince(pid,vid); n++; }
+    }
+    if(!n){ pushLog('所选省份都不在我国实际控制之下','war'); return; }
+    pushLog(`👑 ${n} 省赐予 ${t.name}，以为藩屏`,'gold',me);
+    grantMapCancel();
+    labelsDirty=true; recolorAll(); refreshPanel();
+    return;
+  }
+
+  /* ---- 建立新的傀儡国 ---- */
+  const name=grantMap.name;
+  const cap=grantMap.capital&&grantMap.pids.has(grantMap.capital)?grantMap.capital:pids[0];
   if(MP.online){
     mpCmd({c:'found',prov:cap,name,pids});
     grantMapCancel();
@@ -1057,16 +1091,16 @@ function infoTab(){
       if(!overlordOf(player)&&c.provList.length>1&&p.controller===player){
         h+=`<div><button class="act" style="background:#2a2440;border-color:#6a5a9a;color:#d0b0ff" data-act="found-vassal" data-v="${p.id}" title="进入「分封地图」：以该省为首府，在地图上连续点选要封出去的省份（可点「＋纳入接壤省」整片划），最后一次性建立傀儡国。傀儡国叛乱倾向只有附庸国的 5%">🏳 划地分封（建立傀儡国）</button></div>`;
       }
-      // 赠地给属国：将该省交给指定小弟
+      // 划地赐予属国：与「划地分封」同一套地图交互，一次划一整片
       const myVass=countries.filter(x=>x&&x.alive&&x.overlord===player);
       if(myVass.length){
         const canGive=p.controller===player&&c.provList.length>1;
         h+=`<div style="margin-top:4px;display:flex;gap:4px;align-items:center;flex-wrap:wrap">
-          <span class="hint" style="white-space:nowrap">赠予属国：</span>
+          <span class="hint" style="white-space:nowrap">赐地给属国：</span>
           <select id="give-sel" style="background:#1c2430;color:#d8d0c0;border:1px solid #607080;border-radius:3px;padding:2px 4px;font-size:12px;max-width:150px">
             ${myVass.map(x=>`<option value="${x.id}">${x.name}（${x.provList.length}省）</option>`).join('')}
           </select>
-          <button class="act" data-act="give-vassal" data-v="${p.id}" ${canGive?'':'disabled'} title="将该省的所有权交给所选属国">赐地</button>
+          <button class="act" data-act="give-vassal" data-v="${p.id}" ${canGive?'':'disabled'} title="进入划地模式：在地图上连续点选要划给该属国的省份（可点「＋纳入接壤省」整片划），最后一次性赐地">🗺 划地赐予</button>
         </div>`;
       }
     }
@@ -1287,7 +1321,7 @@ document.addEventListener('click',e=>{
     case 'diplo-vassal': diploVassal(+v); break;
     case 'annex-vassal': annexVassal(+v); break;
     case 'release-vassal': releaseVassal(+v); break;
-    case 'give-vassal': { const sel=$('give-sel'); giveProvinceToVassal(+v, sel?+sel.value:0); break; }
+    case 'give-vassal': { const sel=$('give-sel'); grantMapBeginGive(+v, sel?+sel.value:0); break; }
     case 'vassal-color': toggleVassalColor(+v); break;
     case 'vcolor-set': setVassalColor(+v, String(el.dataset.rgb||'').split(',').map(Number)); break;
     case 'vcolor-random': setVassalColor(+v, hsl(Math.random(),0.58,0.5).map(x=>Math.round(x))); break;

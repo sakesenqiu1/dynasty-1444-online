@@ -376,12 +376,25 @@ class Room {
         break;
       }
       case 'give': {
-        const prov = st.provinces[+m.prov], vid = +m.to;
-        if (!prov || prov.owner !== me || prov.controller !== me) throw new Error('该省不在你的实际控制下');
+        const vid = +m.to;
         if (core.overlordOf(vid) !== me) throw new Error('对方不是你的附庸');
-        if (st.countries[me].provList.length <= 1) throw new Error('仅剩一省，不可拱手让人');
-        core.transferProvince(prov.id, vid);
-        core.pushLog(`👑 ${prov.name} 赐予 ${st.countries[vid].name}，以为藩屏`, 'gold', me);
+        /* 划地赐予：一次可以给一整片。兼容旧的单省 {prov} 形式。
+           与 found 一样逐省重新校验，失效的单格跳过而不是整条失败。 */
+        const want = Array.isArray(m.pids) ? m.pids : [m.prov];
+        if (want.length > 120) throw new Error('一次最多划出 120 个省份');
+        const good = [];
+        for (const q of want) {
+          const pid = +q;
+          if (!pid) continue;
+          const prov = st.provinces[pid];
+          if (!prov || !prov.pix.length) continue;
+          if (prov.owner !== me || prov.controller !== me) continue;
+          good.push(pid);
+        }
+        if (!good.length) throw new Error('所选省份都不在你的实际控制下');
+        if (st.countries[me].provList.length <= good.length) throw new Error('至少要为我国保留一个省份');
+        for (const pid of good) core.transferProvince(pid, vid);
+        core.pushLog(`👑 ${good.length} 省赐予 ${st.countries[vid].name}，以为藩屏`, 'gold', me);
         break;
       }
       case 'found': {

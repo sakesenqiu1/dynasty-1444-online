@@ -498,6 +498,92 @@ check('点击可选省份会加入封地', tGrant4.handled === true && tGrant4.a
 check('再点一次会移出', tGrant4.handledAgain === true && tGrant4.afterAgain === tGrant4.before, tGrant4);
 check('退出分封模式后不再拦截地图点击', tGrant4.offMode === false, tGrant4);
 
+console.log('\n-- 13e. 划地赐予已有属国（与分封同一套交互） --');
+const tGive = run(`
+  resetWorld(); buildWorld(); player=140; setHumans([140]); MP.online=false; started=true;
+  const me=countries[140];
+  // 先建一个只有一省的小属国
+  const seed=me.provList.find(i=>provinces[i].pix.length);
+  const vassalId=foundVassal(140,seed,'受封国');
+  const vassal=countries[vassalId];
+  const vBefore=vassal.provList.length;
+  const mineBefore=countries[140].provList.length;
+
+  // 从一块自己的省进入划地赐予
+  const start=countries[140].provList.find(i=>provinces[i].pix.length);
+  grantMapBeginGive(start,vassalId);
+  const began={ on:grantMap.on, mode:grantMap.mode, target:grantMap.target,
+                name:grantMap.name, n:grantMap.pids.size };
+  const bar=document.getElementById('grantbar'); bar.innerHTML=''; updateGrantBar();
+  const barText=bar.innerHTML;
+
+  // 不能赐给非属国：应被拒绝，且不影响当前选区/目标
+  const foreign=countries.find(c=>c&&c.alive&&c.id!==140&&!c.overlord&&c.provList.length>0);
+  const pidsSnapshot=[...grantMap.pids];
+  grantMapBeginGive(start,foreign.id);
+  const rejectedForeign=grantMap.target===vassalId&&grantMap.mode==='give'&&
+                        grantMap.pids.size===pidsSnapshot.length&&grantMap.pids.has(pidsSnapshot[0]);
+
+  grantMapAbsorb();
+  const selected=grantMap.pids.size;
+  const pids=[...grantMap.pids];
+  grantMapConfirm();
+  const after={
+    on:grantMap.on,
+    vProvs:countries[vassalId].provList.length,
+    mineAfter:countries[140].provList.length,
+    allMine:provinces[pids[0]].owner===vassalId,
+    everyTransferred:pids.every(pid=>provinces[pid].owner===vassalId&&provinces[pid].controller===vassalId),
+    stillMyVassal:overlordOf(vassalId)===140,
+    subjUnchanged:countries[vassalId].subject,
+  };
+  return { vassalId, vBefore, mineBefore, began, barText, rejectedForeign, selected, after,
+           barSaysGive:barText.includes('赐地给'), barHasConfirm:barText.includes('确认赐地'),
+           barHasAbsorb:barText.includes('grant-absorb') };
+`);
+check('进入划地赐予模式', tGive.began.on === true && tGive.began.mode === 'give', tGive.began);
+check('目标属国正确', tGive.began.target === tGive.vassalId && tGive.began.name === '受封国', tGive.began);
+check('操作条显示「赐地给」', tGive.barSaysGive === true, String(tGive.barText).slice(0, 160));
+check('操作条按钮是「确认赐地」并带「纳入接壤省」', tGive.barHasConfirm && tGive.barHasAbsorb, String(tGive.barText).slice(0, 160));
+check('拒绝把地赐给非属国', tGive.rejectedForeign === true, tGive);
+check('「纳入接壤省」扩展了选区', tGive.selected > 1, tGive.selected);
+check('确认后退出划地模式', tGive.after.on === false, tGive.after);
+check('【核心】属国拿到全部所选省份', tGive.after.everyTransferred === true, tGive.after);
+check('属国省份数按选区增加', tGive.after.vProvs === tGive.vBefore + tGive.selected, tGive.after);
+check('宗主少掉对应省数', tGive.after.mineAfter === tGive.mineBefore - tGive.selected, tGive.after);
+check('属国关系不变（仍是傀儡国）', tGive.after.stillMyVassal === true && tGive.after.subjUnchanged === 2, tGive.after);
+
+console.log('\n-- 13f. 划地赐予的边界 --');
+const tGive2 = run(`
+  resetWorld(); buildWorld(); player=140; setHumans([140]); MP.online=false; started=true;
+  const me=countries[140];
+  const seed=me.provList.find(i=>provinces[i].pix.length);
+  const vassalId=foundVassal(140,seed,'受封国');
+  const start=countries[140].provList.find(i=>provinces[i].pix.length);
+  const nBefore=countries[vassalId].provList.length;
+  const mineBefore=countries[140].provList.length;
+
+  // 1) 取消不转地
+  grantMapBeginGive(start,vassalId);
+  grantMapAbsorb();
+  const sel=grantMap.pids.size;
+  grantMapCancel();
+  const afterCancel={ v:countries[vassalId].provList.length, on:grantMap.on };
+
+  // 2) 想把全部领土都赐出去 → 最后一个省必须被拦住
+  grantMapBeginGive(start,vassalId);
+  for(const pid of [...countries[140].provList]) grantMapToggle(pid);
+  const selectedAll=grantMap.pids.size;
+  grantMapConfirm();
+  const afterAll={ mineLeft:countries[140].provList.length, v:countries[vassalId].provList.length,
+                   transferred:countries[vassalId].provList.length-nBefore };
+
+  return { nBefore, mineBefore, sel, afterCancel, selectedAll, afterAll };
+`);
+check('取消后不转地', tGive2.afterCancel.v === tGive2.nBefore && tGive2.afterCancel.on === false, tGive2.afterCancel);
+check('无法选走最后一个省', tGive2.selectedAll === tGive2.mineBefore - 1, tGive2);
+check('赐地后我国至少还剩一省', tGive2.afterAll.mineLeft >= 1, tGive2.afterAll);
+
 /* ================= 14. 回归：模拟长跑 ================= */
 console.log('\n-- 14. 回归 --');
 const t12 = run(`

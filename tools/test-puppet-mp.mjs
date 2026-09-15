@@ -77,6 +77,24 @@ class Client {
     }
     return W;
   }
+  /* 合并快照 + pr 增量，得到某个省当前的所有者 */
+  ownerOf(pid) {
+    let o = null;
+    if (this.snapshot && this.snapshot.prov[pid - 1]) o = this.snapshot.prov[pid - 1][0];
+    for (const m of this.msgs) {
+      if (m.t !== 'delta' || !m.d.pr) continue;
+      for (const r of m.d.pr) if (r[0] === pid) o = r[1];
+    }
+    return o;
+  }
+  /* 某国此刻拥有的省份数（按 pr 增量累加） */
+  provCount(cid) {
+    let n = 0;
+    for (let i = 1; i <= (this.snapshot ? this.snapshot.prov.length : 0); i++) {
+      if (this.ownerOf(i) === cid) n++;
+    }
+    return n;
+  }
 }
 
 console.log('\n=== 傀儡国 / 改色 / 改名 联机协议测试 ===\n');
@@ -181,8 +199,49 @@ await sleep(400);
 const gNow = host.countries()[140].g;
 check('余额已减少', gNow < goldBefore, `${goldBefore} -> ${gNow}`);
 
-/* ---- 5. 傀儡国叛乱倾向（服务端 state 直接读） ---- */
-console.log('\n-- 5. 傀儡国不参与自动叛乱（跑一段时间） --');
+/* ---- 5. 划地赐予（多省，与分封同一套交互） ---- */
+console.log('\n-- 5. 一次赐予多个省份给属国 --');
+const gMark2 = guest.errMark();
+const hMark3 = host.errMark();
+// 找几块仍在我朝手里的省
+const mine = [];
+for (let i = 1; i <= host.snapshot.prov.length; i++) {
+  if (host.ownerOf(i) === 140) mine.push(i);
+}
+const givePids = mine.slice(0, 3);
+check('找到可赐予的省份', givePids.length >= 2, givePids);
+const provsBefore = host.provCount(pupId);
+host.send({ t: 'cmd', c: 'give', to: pupId, pids: givePids });
+await sleep(700);
+check('赐地指令被接受（无错误）', host.newErrors(hMark3).length === 0, host.newErrors(hMark3).join('|'));
+check('【多省】一次划给属国 3 省', host.provCount(pupId) === provsBefore + givePids.length,
+  { before: provsBefore, after: host.provCount(pupId), want: givePids.length });
+check('客人端也同步到了', guest.provCount(pupId) === provsBefore + givePids.length,
+  { guest: guest.provCount(pupId), host: host.provCount(pupId) });
+
+/* 兼容旧的单省 {prov} 形式 */
+const onePid = mine.find(x => !givePids.includes(x));
+if (onePid) {
+  const b = host.provCount(pupId);
+  host.send({ t: 'cmd', c: 'give', prov: onePid, to: pupId });
+  await sleep(600);
+  check('旧的单省 {prov} 形式仍可用', host.newErrors(hMark3).length === 0 && host.provCount(pupId) === b + 1,
+    { errors: host.newErrors(hMark3).join('|'), before: b, after: host.provCount(pupId) });
+}
+
+/* 非宗主不能赐地 */
+const gMark3 = guest.errMark();
+guest.send({ t: 'cmd', c: 'give', to: pupId, pids: [mine[0]] });
+await sleep(600);
+check('非宗主赐地被拒绝', guest.newErrors(gMark3).length > 0, guest.newErrors(gMark3).join('|'));
+
+/* 不能把全部领土都赐出去 */
+host.send({ t: 'cmd', c: 'give', to: pupId, pids: mine });
+await sleep(700);
+check('想把全部领土赐出去被拒绝', host.newErrors(hMark3).length > 0, host.newErrors(hMark3).slice(-2).join('|'));
+
+/* ---- 6. 傀儡国不参与自动叛乱（跑一段时间） ---- */
+console.log('\n-- 6. 傀儡国不参与自动叛乱（跑一段时间） --');
 host.send({ t: 'cmd', c: 'speed', speed: 5 });
 await sleep(4000);
 const hc5 = host.countries();
