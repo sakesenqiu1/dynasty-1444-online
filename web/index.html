@@ -75,6 +75,13 @@ canvas#map.dragging{cursor:grabbing}
 .warbar{height:8px;background:#20140f;border:1px solid #5a3a2a;position:relative;margin:4px 0;border-radius:2px;overflow:hidden}
 .warbar .fill{position:absolute;top:0;bottom:0}
 .sep{border-top:1px solid #3a3222;margin:8px 0}
+/* ---------- 分封地图操作条 ---------- */
+#grantbar{position:absolute;left:50%;transform:translateX(-50%);bottom:14px;z-index:16;
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;max-width:min(96vw,1100px);
+  background:rgba(24,20,32,.94);border:1px solid #6a5a9a;border-radius:4px;
+  padding:7px 12px;font-size:12px;box-shadow:0 4px 18px rgba(0,0,0,.55)}
+#grantbar.hidden{display:none}
+#grantbar button.act{padding:4px 10px;font-size:12px;margin:0}
 /* ---------- 日志 ---------- */
 #logpanel{position:absolute;left:8px;bottom:8px;width:330px;max-height:180px;z-index:14;background:rgba(16,15,12,.88);border:1px solid #3a3222;border-radius:3px;padding:6px 8px;overflow-y:auto;font-size:11.5px;line-height:1.5}
 #logpanel::-webkit-scrollbar{width:6px}
@@ -191,6 +198,8 @@ kbd{background:#2c271e;border:1px solid #55492c;border-radius:2px;padding:0 4px;
 </div>
 
 <div id="logpanel" class="hidden"><div class="lt">史官记事</div><div id="log-body"></div></div>
+
+<div id="grantbar" class="hidden"></div>
 
 <div id="selectmodal" class="modal hidden">
   <div class="mbox">

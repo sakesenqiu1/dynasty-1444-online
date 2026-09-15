@@ -37,6 +37,7 @@ jobs:
           node tools/test-fix5-unit.mjs
           node tools/test-newcountry-label.mjs
           node tools/test-puppet-unit.mjs
+          node tools/test-occupy-return.mjs
 
       - name: 协议端到端（本地起服务 + 两个客户端）
         run: |

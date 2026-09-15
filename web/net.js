@@ -278,6 +278,7 @@ function mpTopbarBadge() {
 
 /* ---------------- 快照 / 增量 ---------------- */
 function applySnapshot(d) {
+  if (typeof grantMapCancel === 'function') grantMapCancel();   // 换局：退出分封地图
   applySaveData(d);
   const st = getState();
   // 服务端的 pendingOffers 通过快照/增量单独同步

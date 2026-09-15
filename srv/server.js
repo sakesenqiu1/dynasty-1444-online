@@ -385,17 +385,32 @@ class Room {
         break;
       }
       case 'found': {
-        const name = String(m.name || '').trim().replace(/[\u0000-\u001f<>]/g, '').slice(0, 12);
-        if (!name) throw new Error('请给新的附庸国起个名字');
+        const name = core.sanitizeCountryName(m.name);
+        if (!name) throw new Error('请给新的傀儡国起个国名');
         if (core.overlordOf(me)) throw new Error('附庸之身不可另立藩属');
         const pv = st.provinces[+m.prov];
         if (!pv || !pv.pix.length) throw new Error('无效的省份');
         if (pv.owner !== me || pv.controller !== me) throw new Error('只能在自己实际控制的领土上建国');
-        if (st.countries[me].provList.length <= 1) throw new Error('仅剩一省，不可再分封');
         if (st.countries.length >= 240) throw new Error('世界上的国家已经太多了');
-        const nid = core.foundVassal(me, pv.id, name);
-        if (!nid) throw new Error('建立附庸国失败');
-        core.pushLog(`👳 ${name} 于 ${pv.name} 立国，奉 ${st.countries[me].name} 为宗主`, 'gold', 0);
+        /* 分封地图可以一次划出一整片封地。地图状态可能已经过期（那一格刚被敌人占走），
+           所以逐省重新校验，不合格的跳过而不是整条指令失败——
+           否则玩家点了几十格会因为其中一格失效而全部白费。 */
+        const extra = [];
+        if (Array.isArray(m.pids)) {
+          if (m.pids.length > 120) throw new Error('一次最多划出 120 个省份');
+          for (const q of m.pids) {
+            const pid = +q;
+            if (!pid || pid === pv.id) continue;
+            const pp = st.provinces[pid];
+            if (!pp || !pp.pix.length) continue;
+            if (pp.owner !== me || pp.controller !== me) continue;
+            extra.push(pid);
+          }
+        }
+        if (st.countries[me].provList.length <= extra.length + 1) throw new Error('至少要为我国保留一个省份');
+        const nid = core.foundVassal(me, pv.id, name, extra);
+        if (!nid) throw new Error('分封失败（封地须在你实际控制之下）');
+        core.pushLog(`👳 ${name} 于 ${pv.name} 立国，奉 ${st.countries[me].name} 为宗主（${extra.length + 1}省）`, 'gold', 0);
         break;
       }
       case 'rename': {

@@ -970,6 +970,9 @@ function monthlyTick(){
      推到一个 tick 之后能把这根尖峰摊成两半，服务端就不容易掉帧。 */
   _aiPending=true;
   attritionMonthly();
+  // 兜底：任何绕开 makePeace 的宗主/盟约变动（放附庸独立、吞并、复国……）
+  // 都可能留下"控制者与所有者已不交战"的幽灵占领，每月清一次
+  releaseStaleOccupations();
   for(const k in pendingOffers){
     if(pendingOffers[k].expire<dayCount){ delete pendingOffers[k]; UI.panel(); }
   }
@@ -1459,6 +1462,34 @@ function declareWar(a,d){
   }
   UI.panel();
 }
+/* ---------- 占领合法性 ----------
+   一条占领只有"控制者与所有者仍处于战争状态"时才成立。
+   任何原因导致两者不再交战（战争结束、附庸关系变化、第三方媾和、
+   盟约变更……），占领都必须归还给所有者。
+
+   旧实现只在 makePeace 里判断"owner 与 controller 是否分属本战争两侧"，
+   漏掉了同阵营的情况：敌人占了附庸的省、宗主再打回来时，owner 与 controller
+   同属一方，于是永远不还 —— 表现为"宗主国一直占着附庸的领土"。
+   盟友之间互相收复、附庸替宗主收复也是同一个洞。
+
+   同阵营时 atWar() 返回 false（campOf 相同），所以这条统一规则天然覆盖全部情形：
+     · 敌人占领        → 仍在交战   → 保留（战后由 makePeace 之外的逻辑割让才易主）
+     · 第三方在别的战争里占领 → 仍在交战 → 保留
+     · 宗主/盟友收复自家或藩属的省 → 不交战 → 归还
+   返回归还的省份数。 */
+function releaseStaleOccupations(){
+  let n=0;
+  for(let i=1;i<provinces.length;i++){
+    const p=provinces[i];
+    if(!p.pix.length||p.controller===p.owner) continue;
+    if(atWar(p.controller,p.owner)) continue;      // 合法占领，保留
+    p.controller=p.owner; p.siege=0;
+    UI.recolorNbrs(i);
+    n++;
+  }
+  if(n) labelsDirty=true;
+  return n;
+}
 function makePeace(w,transfers,byPlayer,releases){
   // 先收集盟友参战的连带战争（在主战争被移除前），再一并终结
   const joins=[];
@@ -1467,20 +1498,10 @@ function makePeace(w,transfers,byPlayer,releases){
   for(const jw of joins) makePeace(jw,[],false);
   UI.cedeReset(); // 战争结束：退出割地地图模式
   for(const t of transfers) transferProvince(t.pid,t.to);
-  // 复位占领：仅当 owner 与 controller 分属战争两侧阵营（含附庸）时才还原。
-  // 第三方（C、D 等不在本战争内的势力）的占领或被占领状态必须保留——
-  // 它们与本战争各方各自另有的战事会单独通过 makePeace 处置。
-  const aCamp=campOf(w.a), dCamp=campOf(w.d);
-  for(let i=1;i<provinces.length;i++){
-    const p=provinces[i];
-    if(p.pix.length&&p.controller!==p.owner){
-      const ownA=aCamp.has(p.owner), ctlA=aCamp.has(p.controller);
-      const ownD=dCamp.has(p.owner), ctlD=dCamp.has(p.controller);
-      if((ownA&&ctlD)||(ownD&&ctlA)){
-        p.controller=p.owner; p.siege=0; UI.recolorNbrs(i);
-      }
-    }
-  }
+  /* 复位占领：战争结束、附庸条款生效后，把所有"控制者与所有者已不再交战"的
+     占领一律归还。放在这里而不是逐条判断阵营，是为了同时覆盖
+     宗主/盟友替自家收复、附庸替宗主收复等全部同阵营情形。 */
+  releaseStaleOccupations();
   // 释放附庸条款：战败方放其附庸独立（疆土归附庸自己，与旧宗主及交战双方立十年之好）
   if(releases&&releases.length){
     for(const cid of releases){
@@ -1507,16 +1528,25 @@ function makePeace(w,transfers,byPlayer,releases){
                       transfers.length&&(A.provList.length>4||D.provList.length>4));
   }
   labelsDirty=true;
+  // 释放附庸条款改变了宗主关系 → 阵营变了，再扫一次，保证没有幽灵占领残留
+  releaseStaleOccupations();
   UI.panel();
 }
 /* ---------- 建立附庸国 ----------
-   在自己实际控制的领土上分封一个由玩家命名的新国家（首都在所选省份）。 */
-function foundVassal(overlord, capitalPid, name){
+   在自己实际控制的领土上分封一个由玩家命名的新国家（首都在所选省份）。
+   pids 可以一次给多个省 —— 「分封地图」就是用它一次性划出整片封地。 */
+function foundVassal(overlord, capitalPid, name, extraPids){
   const ov=countries[overlord];
   const p=provinces[capitalPid];
   if(!ov||!ov.alive||!p||!p.pix.length) return 0;
   if(p.owner!==overlord||p.controller!==overlord) return 0;
-  if(ov.provList.length<=1) return 0;          // 不能把最后一省分出去
+  // 分封后宗主至少要留一省
+  const give=new Set([capitalPid]);
+  if(Array.isArray(extraPids)) for(const q of extraPids){
+    const pp=provinces[q];
+    if(pp&&pp.pix.length&&pp.owner===overlord&&pp.controller===overlord) give.add(q);
+  }
+  if(ov.provList.length<=give.size) return 0;   // 不能把全部领土都分出去
   const id=countries.length;
   const hue=(hash32(id*2654435761+dayCount*97)%360)/360;
   const nc={ id, featId:'CUSTOM', name, enName:name,
@@ -1525,9 +1555,15 @@ function foundVassal(overlord, capitalPid, name){
              gold:120, mp:6000, mpCap:0, forceLimit:0,
              overlord:0, allies:[], ruler:RULERS[ri(RULERS.length)]+ROMAN[ri(10)], lx:0, ly:0 };
   countries.push(nc);
-  transferProvince(capitalPid, id);
-  // 新附庸不算"故土"，把这条记录抹掉，免得日后宗主亡国时误判
-  if(p.former) p.former=p.former.filter(x=>x!==overlord);
+  // 先划地再建关系：transferProvince 里会调 checkDeath，宗主丢光省份的判定
+  // 已经在上面用 give.size 挡住了
+  for(const pid of give){
+    transferProvince(pid, id);
+    // 新分封的疆土不算"故土"，抹掉这条记录，免得日后宗主亡国时误判复国位置
+    const pp=provinces[pid];
+    if(pp.former) pp.former=pp.former.filter(x=>x!==overlord);
+  }
+  nc.capital=give.has(capitalPid)?capitalPid:[...give][0];
   nc.overlord=overlord;
   nc.subject=SUBJ_PUPPET;      // 玩家亲手分封 → 傀儡国（叛乱倾向仅 5%）
   recomputeCap(nc);
@@ -1775,7 +1811,7 @@ if(typeof module!=='undefined'&&module.exports){
     makeSaveData,applySaveData,pushLog,pushLogTo,pushLogWorld,fmtDate,
     decodeTopo,buildLand,buildProvinces,buildCountries,rebuildLabels,recomputeCap,totalDev,devOf,
     tickDay,advanceDay,mergeArmies,resolveBattles,resolveSieges,monthlyTick,economy,aiMonthly,
-    declareWar,makePeace,transferProvince,checkDeath,vassalize,
+    declareWar,makePeace,transferProvince,checkDeath,vassalize,releaseStaleOccupations,
     warScore,peaceCost,releaseCost,canDemandProvince,occRatio,atWar,inWar,truceBetween,truceKey,
     overlordOf,isAllied,formAlliance,breakAlliance,clearAllAlliances,campOf,vassalsAllOf,
     subjectOf,isPuppet,setOverlord,SUBJ_VASSAL,SUBJ_PUPPET,PUPPET_REBEL_MUL,

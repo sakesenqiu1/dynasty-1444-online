@@ -50,6 +50,8 @@ const sb = {
   localStorage: { getItem: () => null, setItem: noop, removeItem: noop },
   sessionStorage: { getItem: () => null, setItem: noop, removeItem: noop },
   WebSocket: function () { this.readyState = 0; this.send = noop; this.close = noop; },
+  // 浏览器全局：割地/分封地图的高亮层要 new ImageData(COLS,ROWS)
+  ImageData: function (w, h) { this.width = w; this.height = h; this.data = new Uint8ClampedArray(w * h * 4); },
   URLSearchParams, navigator: { userAgent: 'node' }, alert: noop, confirm: () => false,
   promptReply: '新国号',
   noop, addEventListener: noop, innerWidth: 1280, innerHeight: 800, devicePixelRatio: 1,
@@ -375,8 +377,129 @@ check('收到断盟增量后不再是盟友', tAlliance.broken.allied === false,
 check('断盟后颜色不再是蓝色', !eq(tAlliance.broken.color, tAlliance.blue), tAlliance);
 check('断盟后按钮变回「结盟」', tAlliance.hasAllyBtnAfterBreak === true, tAlliance);
 
-/* ================= 13. 回归：模拟长跑 ================= */
-console.log('\n-- 12. 回归 --');
+/* ================= 13. 分封地图（一次划地建国） ================= */
+console.log('\n-- 13. 分封地图：一次划出整片封地 --');
+const tGrant = run(`
+  resetWorld(); buildWorld(); player=140; setHumans([140]); MP.online=false; started=true;
+  const me=countries[140];
+  const start=me.provList.find(i=>provinces[i].pix.length);
+  const mineBefore=me.provList.length;
+
+  grantMapBegin(start,'辽东国');
+  const began={ on:grantMap.on, n:grantMap.pids.size, cap:grantMap.capital, name:grantMap.name };
+  const bar=document.getElementById('grantbar');
+  bar.innerHTML=''; updateGrantBar();
+  const barOn=bar.innerHTML;
+
+  // 别人的省份不能划进来
+  const foreign=countries.find(c=>c&&c.alive&&c.id!==140&&!c.overlord&&c.provList.length>0);
+  const foreignPid=foreign.provList.find(i=>provinces[i].pix.length);
+  const beforeN=grantMap.pids.size;
+  grantMapToggle(foreignPid);
+  const rejectedForeign=grantMap.pids.size===beforeN;
+
+  grantMapAbsorb();
+  const selected=grantMap.pids.size;
+  const pids=[...grantMap.pids];
+
+  const nBefore=countries.length;
+  grantMapConfirm();
+  const nid=nBefore;
+  const nc=countries[nid];
+  const after={
+    on:grantMap.on, n:countries.length,
+    name:nc?nc.name:null, ov:nc?nc.overlord:null, subj:nc?nc.subject:null,
+    provs:nc?nc.provList.length:0,
+    capIsSelected:nc?pids.includes(nc.capital):false,
+    mineAfter:countries[140].provList.length,
+    formerHasOverlord:nc?nc.provList.some(pid=>provinces[pid].former&&provinces[pid].former.includes(140)):null,
+    ownerOk:nc?nc.provList.every(pid=>provinces[pid].owner===nid&&provinces[pid].controller===nid):null,
+  };
+  return { mineBefore, nBefore, began, barOn, rejectedForeign, selected, after,
+           barHasConfirm:barOn.includes('grant-confirm'), barHasAbsorb:barOn.includes('grant-absorb'),
+           barHasName:barOn.includes('辽东国') };
+`);
+check('进入分封地图，首省已选中', tGrant.began.on === true && tGrant.began.n === 1 && tGrant.began.name === '辽东国', tGrant.began);
+check('操作条显示国名', tGrant.barHasName === true, String(tGrant.barOn).slice(0, 160));
+check('操作条有「确认分封」与「纳入接壤省」', tGrant.barHasConfirm && tGrant.barHasAbsorb, String(tGrant.barOn).slice(0, 160));
+check('拒绝选入他国省份', tGrant.rejectedForeign === true, tGrant);
+check('「纳入接壤省」扩展了封地', tGrant.selected > 1, tGrant.selected);
+check('确认后退出地图模式', tGrant.after.on === false, tGrant.after);
+check('只新建了一个国家', tGrant.after.n === tGrant.nBefore + 1, { after: tGrant.after.n, before: tGrant.nBefore });
+check('新国家名字正确', tGrant.after.name === '辽东国', tGrant.after);
+check('新国家是傀儡国', tGrant.after.subj === 2, tGrant.after);
+check('封地省份数 = 选中数', tGrant.after.provs === tGrant.selected, tGrant.after);
+check('首府在所选范围内', tGrant.after.capIsSelected === true, tGrant.after);
+check('所有封地都归新国家所有并控制', tGrant.after.ownerOk === true, tGrant.after);
+check('宗主少掉对应省数', tGrant.after.mineAfter === tGrant.mineBefore - tGrant.selected, tGrant.after);
+check('封地 former 不残留宗主（不会被当成故土）', tGrant.after.formerHasOverlord === false, tGrant.after);
+
+console.log('\n-- 13b. 不能把全部领土都封出去 --');
+const tGrant2 = run(`
+  resetWorld(); buildWorld(); player=140; setHumans([140]); MP.online=false; started=true;
+  const me=countries[140];
+  const start=me.provList.find(i=>provinces[i].pix.length);
+  const total=me.provList.length;
+  grantMapBegin(start,'贪心国');
+  for(const pid of [...me.provList]) grantMapToggle(pid);
+  const selected=grantMap.pids.size;
+  const nBefore=countries.length;
+  grantMapConfirm();
+  return { total, selected, nBefore, nAfter:countries.length, on:grantMap.on,
+           mineLeft:countries[140].provList.length };
+`);
+check('无法选走最后一个省', tGrant2.selected === tGrant2.total - 1, tGrant2);
+check('确认后我国至少还剩一省', tGrant2.mineLeft >= 1, tGrant2);
+
+console.log('\n-- 13c. 取消 / 清空 / 空选区 --');
+const tGrant3 = run(`
+  resetWorld(); buildWorld(); player=140; setHumans([140]); MP.online=false; started=true;
+  const me=countries[140];
+  const start=me.provList.find(i=>provinces[i].pix.length);
+  const nBefore=countries.length;
+  grantMapBegin(start,'取消国');
+  grantMapAbsorb();
+  const n1=grantMap.pids.size;
+  grantMapCancel();
+  const cancelled={ on:grantMap.on, n:grantMap.pids.size, created:countries.length-nBefore };
+  grantMapBegin(start,'清空国');
+  grantMapAbsorb();
+  grantMap.pids.clear(); grantMap.capital=0; updateGrantBar();
+  const cleared={ on:grantMap.on, n:grantMap.pids.size };
+  grantMapConfirm();
+  const emptyConfirm={ created:countries.length-nBefore };
+  const stillOn=grantMap.on;
+  grantMapCancel();
+  return { n1, cancelled, cleared, emptyConfirm, stillOn };
+`);
+check('扩展出了多个省', tGrant3.n1 > 1, tGrant3.n1);
+check('取消后退出且不建国', tGrant3.cancelled.on === false && tGrant3.cancelled.n === 0 && tGrant3.cancelled.created === 0, tGrant3.cancelled);
+check('清空后选区为空但仍在分封模式', tGrant3.cleared.on === true && tGrant3.cleared.n === 0, tGrant3.cleared);
+check('空选区确认不会建国', tGrant3.emptyConfirm.created === 0 && tGrant3.stillOn === true, tGrant3);
+
+console.log('\n-- 13d. 地图点击路由 --');
+const tGrant4 = run(`
+  resetWorld(); buildWorld(); player=140; setHumans([140]); MP.online=false; started=true;
+  const me=countries[140];
+  const start=me.provList.find(i=>provinces[i].pix.length);
+  const other=me.provList.find(i=>i!==start&&provinces[i].pix.length&&provinces[i].nbrs.includes(start))
+            ?? me.provList.find(i=>i!==start&&provinces[i].pix.length);
+  grantMapBegin(start,'点击国');
+  const before=grantMap.pids.size;
+  const handled=grantMapToggle(other);
+  const after=grantMap.pids.size;
+  const handledAgain=grantMapToggle(other);
+  const afterAgain=grantMap.pids.size;
+  grantMapCancel();
+  const offMode=grantMapToggle(other);
+  return { before, after, afterAgain, handled, handledAgain, offMode };
+`);
+check('点击可选省份会加入封地', tGrant4.handled === true && tGrant4.after === tGrant4.before + 1, tGrant4);
+check('再点一次会移出', tGrant4.handledAgain === true && tGrant4.afterAgain === tGrant4.before, tGrant4);
+check('退出分封模式后不再拦截地图点击', tGrant4.offMode === false, tGrant4);
+
+/* ================= 14. 回归：模拟长跑 ================= */
+console.log('\n-- 14. 回归 --');
 const t12 = run(`
   resetWorld(); buildWorld(); setHumans([140,44]);
   player=140;
