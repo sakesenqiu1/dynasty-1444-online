@@ -130,6 +130,45 @@ cd srv && npm install && node server.js
 
 开两个浏览器窗口（或一个正常窗口 + 一个隐私窗口）就能自己和自己联机测试。
 
+### 使用 PM2 进程管理（推荐）
+
+PM2 可以让游戏服务在后台持久运行，支持崩溃自动重启和开机自启。
+
+```bash
+# 安装依赖（自动安装 PM2）
+npm install
+
+# 使用 PM2 启动
+npm run prod
+
+# 设置开机自启（首次执行一次）
+pm2 startup
+pm2 save
+```
+
+**常用命令**：
+
+| 命令 | 说明 |
+|------|------|
+| `npm run prod` | PM2 启动服务 |
+| `npm run stop` | 停止服务 |
+| `npm run restart` | 重启服务 |
+| `npm run logs` | 查看日志 |
+| `npx pm2 list` | 查看所有进程 |
+| `npx pm2 monit` | 监控面板 |
+| `npx pm2 stop all` | 停止所有进程 |
+| `npx pm2 restart all` | 重启所有进程 |
+| `npx pm2 delete all` | 删除所有进程 |
+| `npx pm2 save` | 保存进程列表 |
+| `npx pm2 flush dynasty-1444` | 清空日志 |
+
+**取消开机自启**：
+
+```bash
+pm2 unstartup
+pm2 save
+```
+
 ---
 
 ## 部署到服务器
