@@ -170,7 +170,7 @@ function uiTick(t){
 function panelSignature(){
   let s=uiTab+'|'+(player|0)+'|';
   const c=countries[player];
-  if(c) s+=Math.round(c.gold*10)+','+Math.round(c.mp)+','+Math.round(c.income*100)+','+c.provList.length+','+(c.alive?1:0)+',';
+  if(c) s+=Math.round((+c.gold||0)*10)+','+Math.round(+c.mp||0)+','+Math.round((+c.income||0)*100)+','+c.provList.length+','+(c.alive?1:0)+',';
   if(uiTab==='diplo'){
     s+=uiSearch+'|'+diploFocus+'|'+diploColorFor+'|'+wars.length+'|';
     for(let i=1;i<countries.length;i++){
@@ -864,15 +864,20 @@ Object.defineProperty(window,'pendingOffer',{
 function updateTopbar(){
   if(!player) return;
   const c=countries[player];
+  if(!c) return;
   const oc=countries[player];
   let owned=0;
-  for(const pid of oc.provList) if(provinces[pid].controller===player) owned++;
+  for(const pid of oc.provList) if(provinces[pid]&&provinces[pid].controller===player) owned++;
   const str=countryStrength(player);
-  $('tb-country').innerHTML=`<span class="chip" style="background:rgb(${c.color.map(v=>v|0)})"></span><b>${c.name}</b>`;
-  $('tb-ruler').innerHTML=`统治者 <b>${c.ruler}</b> · ${c.provList.length}省(${owned}控)`;
-  $('tb-gold').innerHTML=`国库 <b style="color:${c.gold<10?'#ff9080':'#ffd080'}">${c.gold.toFixed(1)}</b> (${c.income>=0?'+':''}${c.income.toFixed(2)}/月)`;
-  $('tb-mp').innerHTML=`人力 <b>${fmtK(c.mp)}/${fmtK(c.mpCap)}</b>`;
-  $('tb-fl').innerHTML=`军力 <b>${fmtK(str)}/${fmtK(c.forceLimit)}</b>`;
+  /* 兜底：这几个字段在"刚建出来还没过月"的国家上可能还没有值。
+     以前这里直接 .toFixed()，缺字段就抛异常 —— 而 uiTick 每帧都调它，
+     一抛就等于整个界面卡死。 */
+  const gold=+c.gold||0, inc=+c.income||0;
+  $('tb-country').innerHTML=`<span class="chip" style="background:rgb(${(c.color||[120,120,120]).map(v=>v|0)})"></span><b>${c.name||'—'}</b>`;
+  $('tb-ruler').innerHTML=`统治者 <b>${c.ruler||'—'}</b> · ${c.provList.length}省(${owned}控)`;
+  $('tb-gold').innerHTML=`国库 <b style="color:${gold<10?'#ff9080':'#ffd080'}">${gold.toFixed(1)}</b> (${inc>=0?'+':''}${inc.toFixed(2)}/月)`;
+  $('tb-mp').innerHTML=`人力 <b>${fmtK(+c.mp||0)}/${fmtK(+c.mpCap||0)}</b>`;
+  $('tb-fl').innerHTML=`军力 <b>${fmtK(str)}/${fmtK(+c.forceLimit||0)}</b>`;
   $('tb-date').textContent=fmtDate();
   $('btn-pause').textContent=paused?'▶ 继续':'⏸ 暂停';
 }
@@ -979,7 +984,7 @@ function editApplySnap(s){
     for(const r of s.ctry){
       const id=r[0];
       let c=countries[id];
-      if(!c||isVoidCountry(c)){ c={id, featId:'CUSTOM', enName:r[1], provList:[], gold:0, mp:0, mpCap:0, forceLimit:0, ruler:'', lx:0, ly:0}; countries[id]=c; }
+      if(!c||isVoidCountry(c)){ c={id, featId:'CUSTOM', enName:r[1], provList:[], gold:0, mp:0, mpCap:0, income:0, forceLimit:0, ruler:'', lx:0, ly:0}; countries[id]=c; }
       c.name=r[1]; c.enName=r[1]; c.color=r[2].slice(); c.capital=r[3]; c.alive=!!r[4];
       c.overlord=r[5]; c.subject=r[6]; c.allies=r[7].slice();
     }
@@ -1114,7 +1119,7 @@ function editNewCountry(name){
   const hue=(hash32(id*2654435761+_newCountrySeq*97+dayCount)%360)/360;
   const c={id, featId:'CUSTOM', name:nm, enName:nm,
            color:hsl(hue,0.58,0.55).map(v=>v|0),
-           capital:0, provList:[], alive:false, gold:120, mp:6000, mpCap:0, forceLimit:0,
+           capital:0, provList:[], alive:false, gold:120, mp:6000, mpCap:0, income:0, forceLimit:0,
            overlord:0, subject:0, allies:[],
            ruler:RULERS[ri(RULERS.length)]+ROMAN[ri(10)], lx:0, ly:0};
   while(countries.length<id) countries.push(makeVoidCountry(countries.length));
@@ -2041,7 +2046,7 @@ function infoTab(){
     {
       const myVass=countries.filter(x=>x&&x.alive&&x.overlord===player);
       if(myVass.length){
-        const tr=myVass.reduce((a,x)=>a+Math.max(0,x.income)*0.3,0);
+        const tr=myVass.reduce((a,x)=>a+Math.max(0,+x.income||0)*0.3,0);
         h+=`<div class="row"><span>附庸（${myVass.length}）</span>${myVass.map(x=>x.name).join('、')}</div>
             <div class="row"><span>岁贡收入</span><b style="color:#ffd890">+${tr.toFixed(2)} 金/月</b></div>`;
       }

@@ -353,7 +353,7 @@ function mpDelta(m) {
       countries[id] = {
         id, featId: 'CUSTOM', name: r[1], enName: r[1],
         color: (r[2] || [180, 180, 180]).slice(), capital: r[3] || 0,
-        provList: [], alive: true, gold: 0, mp: 0, mpCap: 0, forceLimit: 0,
+        provList: [], alive: true, gold: 0, mp: 0, mpCap: 0, income: 0, forceLimit: 0,
         overlord: 0, allies: [], ruler: '', lx: 0, ly: 0,
       };
       labelsDirty = true;

@@ -758,5 +758,75 @@ const t19b = run(`
 check('老地图往返两次结果稳定', t19b.same === true, t19b);
 check('没有外交/战争时不会写出多余字段', t19b.hasWars === false && t19b.hasDiplo === false, t19b);
 
+/* ================= 20. 顶栏字段兜底（线上卡死事故的回归） ================= */
+console.log('\n-- 20. 剧本新建的国家当玩家时，界面不能崩 --');
+const t20 = run(`
+  // 完全复现线上事故：清空所有国家 → 新建国家 → 用它开局
+  openEditor();
+  editClearAllCountries();
+  const land=provinces.map((p,i)=>p&&p.pix.length?i:0).filter(Boolean);
+  const A=editNewCountry('寒冬极夜');
+  editMode.brush=A;
+  for(const pid of land.slice(0,120)) editPaint(pid);
+  editAddArmy(land[0],9000,false);
+  const sc=makeScenario({name:'寒冬极夜'});
+  // 换成"客户端按地图包重建世界"的路径
+  buildWorldFromScenario(sc);
+  player=A; started=true; MP.online=true;
+  // 关键：这个国家是剧本新建的，从来没经过 monthlyTick/economy，
+  // income 等字段必须已经兜底，否则下面两处会抛异常
+  const c=countries[A];
+  const fields={ income:c.income, gold:c.gold, mp:c.mp, mpCap:c.mpCap, forceLimit:c.forceLimit,
+                 colorOk:Array.isArray(c.color)&&c.color.length===3, provListOk:Array.isArray(c.provList) };
+  let topbarErr=null, panelErr=null, uiTickErr=null;
+  try{ updateTopbar(); }catch(e){ topbarErr=e.message; }
+  try{ refreshPanel(); }catch(e){ panelErr=e.message; }
+  try{ for(let i=0;i<3;i++) uiTick(); }catch(e){ uiTickErr=e.message; }
+  return { A, fields, topbarErr, panelErr, uiTickErr,
+           tbGold:document.getElementById('tb-gold').innerHTML,
+           tbMp:document.getElementById('tb-mp').innerHTML };
+`);
+check('新建国家已带上 income 字段', t20.fields.income === 0, t20.fields);
+const numOk=(v)=>typeof v==='number'&&isFinite(v);
+check('其它数值字段都是有限数字', [t20.fields.gold,t20.fields.mp,t20.fields.mpCap,t20.fields.forceLimit].every(numOk), t20.fields);
+check('有领土的国家起始金不为 0（和原版国家一致）', t20.fields.gold > 0, t20.fields);
+check('人力上限按领土算出来了', t20.fields.mpCap > 0, t20.fields);
+check('颜色与省份列表齐全', t20.fields.colorOk === true && t20.fields.provListOk === true, t20.fields);
+check('【核心】updateTopbar 不抛异常', t20.topbarErr === null, t20.topbarErr);
+check('【核心】refreshPanel 不抛异常', t20.panelErr === null, t20.panelErr);
+check('【核心】uiTick 不抛异常（不会每帧卡死）', t20.uiTickErr === null, t20.uiTickErr);
+check('顶栏金库渲染出了具体数值', /[0-9]+\.[0-9]/.test(t20.tbGold), t20.tbGold);
+check('顶栏人力渲染正常', t20.tbMp.includes('人力') && t20.tbMp.includes('/'), t20.tbMp);
+
+console.log('\n-- 20b. 联机同步过来的新国家也不能崩 --');
+const t20b = run(`
+  resetWorld(); setSeed(SCENARIO_SEED); buildWorld();
+  player=140; started=true; MP.online=true; MP.mapHash='x';
+  // 走 mpDelta 的 cn 分支：客户端本地凭空建一个国家
+  mpDelta({ d:{ cn:[[500,'联机新国',[10,200,90],1]] } });
+  const c=countries[500];
+  const fields={ income:c.income, gold:c.gold, forceLimit:c.forceLimit, colorOk:Array.isArray(c.color) };
+  player=500;                       // 假设这个玩家选了它
+  let err=null;
+  try{ updateTopbar(); refreshPanel(); uiTick(); }catch(e){ err=e.message; }
+  return { fields, err, tb:document.getElementById('tb-gold').innerHTML };
+`);
+check('联机新建国家字段齐全', t20b.fields.income === 0 && t20b.fields.forceLimit === 0, t20b.fields);
+check('【核心】把它当玩家也不崩', t20b.err === null, t20b.err);
+
+console.log('\n-- 20c. 字段缺失时也不该崩（防御性读取） --');
+const t20c = run(`
+  resetWorld(); setSeed(SCENARIO_SEED); buildWorld();
+  const c=countries[140];
+  // 故意把字段抹掉，模拟任何我们没想到的来源
+  delete c.income; delete c.gold; delete c.mp; delete c.mpCap; delete c.forceLimit; delete c.color;
+  player=140; started=true;
+  let err=null;
+  try{ updateTopbar(); refreshPanel(); uiTick(); }catch(e){ err=e.message; }
+  return { err, tb:document.getElementById('tb-gold').innerHTML };
+`);
+check('【核心】字段被抹掉后顶栏也不崩', t20c.err === null, t20c.err);
+check('仍然渲染出合理内容', t20c.tb.includes('0.0'), t20c.tb);
+
 console.log(`\n=== 结果：${failures === 0 ? '全部通过 ✅' : failures + ' 项失败 ❌'} ===\n`);
 process.exit(failures ? 1 : 0);

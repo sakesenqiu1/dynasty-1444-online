@@ -368,6 +368,35 @@ function rebuildLabels(){
    三、游戏逻辑
    ===================================================================== */
 function overlordOf(cid){ const c=countries[cid]; return c&&c.overlord&&countries[c.overlord]&&countries[c.overlord].alive?c.overlord:0; }
+/* ---------- 国家对象字段兜底 ----------
+   income 只在每月 economy() 里才算出来，所以"刚建出来、还没过月"的国家根本没这个字段：
+   世界生成以外的所有来源（剧本新建、分封的附庸、复活的亡国、客户端同步的新国家、
+   读档补建）都会漏。而顶栏每一帧都在读 c.income.toFixed(2) ——
+   联机开局的第一帧就会抛异常，uiTick 每帧都抛，表现就是整个界面卡死。
+
+   与其在每个创建点逐个补字段，不如在国家对象进入世界时统一兜底一次。 */
+const COUNTRY_NUM_FIELDS=['gold','mp','mpCap','income','forceLimit'];
+function ensureCountryFields(c){
+  if(!c) return c;
+  for(const k of COUNTRY_NUM_FIELDS) if(typeof c[k]!=='number'||!isFinite(c[k])) c[k]=0;
+  if(!Array.isArray(c.color)||c.color.length<3) c.color=[180,180,180];
+  if(!c.name) c.name='无名国';
+  if(!c.enName) c.enName=c.name;
+  if(!Array.isArray(c.provList)) c.provList=[];
+  if(!Array.isArray(c.allies)) c.allies=[];
+  c.overlord=c.overlord||0;
+  c.subject=c.overlord?(c.subject||SUBJ_VASSAL):0;
+  c.capital=c.capital||0;
+  c.alive=!!c.alive;
+  if(typeof c.ruler!=='string') c.ruler='';
+  if(typeof c.lx!=='number') c.lx=0;
+  if(typeof c.ly!=='number') c.ly=0;
+  return c;
+}
+function ensureAllCountryFields(){
+  for(let i=1;i<countries.length;i++) if(countries[i]) ensureCountryFields(countries[i]);
+}
+
 /* ---------- 属国类型（国体） ----------
    SUBJ_VASSAL 附庸国：战争附庸化 / 花钱册封 / 于故土复国 —— 常规藩属
    SUBJ_PUPPET 傀儡国：玩家亲自分封建立的新国家 —— 政权完全由宗主搭建，
@@ -1554,7 +1583,7 @@ function foundVassal(overlord, capitalPid, name, extraPids){
   const nc={ id, featId:'CUSTOM', name, enName:name,
              color:hsl(hue,0.55,0.55).map(v=>v|0),
              capital:capitalPid, provList:[], alive:true,
-             gold:120, mp:6000, mpCap:0, forceLimit:0,
+             gold:120, mp:6000, mpCap:0, income:0, forceLimit:0,
              overlord:0, allies:[], ruler:RULERS[ri(RULERS.length)]+ROMAN[ri(10)], lx:0, ly:0 };
   countries.push(nc);
   // 先划地再建关系：transferProvince 里会调 checkDeath，宗主丢光省份的判定
@@ -1838,7 +1867,7 @@ function validateScenario(s){
 function makeVoidCountry(id){
   return {id, featId:'VOID', name:'', enName:'', color:[70,70,70],
           capital:0, provList:[], alive:false, gold:0, mp:0, mpCap:0,
-          forceLimit:0, overlord:0, subject:0, allies:[], ruler:'', lx:0, ly:0};
+          forceLimit:0, income:0, overlord:0, subject:0, allies:[], ruler:'', lx:0, ly:0};
 }
 function isVoidCountry(c){ return !!c && c.featId==='VOID' && !c.provList.length; }
 
@@ -1886,6 +1915,7 @@ function applyScenario(s,keepBase){
   }
 
   /* ---- 国家覆盖（含新建） ---- */
+  const createdIds=new Set();
   for(const k in ct){
     const i=+k; if(!i) continue;
     let c=countries[i];
@@ -1895,8 +1925,9 @@ function applyScenario(s,keepBase){
       if(!o.n) continue;
       c={id:i, featId:'CUSTOM', name:sanitizeCountryName(o.n), enName:sanitizeCountryName(o.n),
          color:[180,180,180], capital:0, provList:[], alive:false, gold:0, mp:0, mpCap:0,
-         forceLimit:0, overlord:0, subject:0, allies:[], ruler:'', lx:0, ly:0};
+         forceLimit:0, income:0, overlord:0, subject:0, allies:[], ruler:'', lx:0, ly:0};
       countries[i]=c;
+      createdIds.add(i);
     }
     if(o.n){ const nm=sanitizeCountryName(o.n); if(nm){ c.name=nm; c.enName=nm; } }
     if(o.c){
@@ -1916,6 +1947,15 @@ function applyScenario(s,keepBase){
   for(let i=1;i<provinces.length;i++){
     const p=provinces[i];
     if(p.pix.length&&countries[p.owner]) countries[p.owner].provList.push(i);
+  }
+  /* 剧本新建的国家若没写起始金，按和原版国家一样的公式补上
+     （buildWorld 里是 40+totalDev*0.6），否则手写地图建出来的国家是空国库。
+     人力不用管：原版国家也是从 0 开始，靠每月 economy() 累积。 */
+  for(const i of createdIds){
+    const c=countries[i]; if(!c) continue;
+    const o=ct[i];
+    if(o&&o.g!=null) continue;
+    if(c.provList.length) c.gold=40+totalDev(c)*0.6;
   }
   for(let i=1;i<countries.length;i++){
     const c=countries[i]; if(!c) continue;
@@ -1943,7 +1983,8 @@ function applyScenario(s,keepBase){
                  path:[], prog:0, isNavy:a.n?1:0});
   }
   recruits=[]; nextRecruit=1;
-  wars=[]; truces={};
+  // 统一兜底：剧本新建的国家也在这时补齐 income 等字段（否则顶栏第一帧就会崩）
+  ensureAllCountryFields();
   const warPairs=Array.isArray(s.wars)?s.wars:[];
   for(const pair of warPairs){
     const a=+((pair&&pair.a)||(pair&&pair[0]))|0, d=+((pair&&pair.d)||(pair&&pair[1]))|0;
@@ -1991,6 +2032,7 @@ function buildWorld(){
   const {cidMap}=buildLand(feats);
   buildProvinces(cidMap,feats);
   buildCountries(cidMap,feats);
+  ensureAllCountryFields();
   return {cidMap,feats};
 }
 /* 当前世界的可序列化快照 */
@@ -2022,7 +2064,7 @@ function applySaveData(d){
       // 世界生成时不存在的国家 = 玩家自建的附庸，按存档里的描述补建出来
       if(!a.n) return;
       c={ id, featId:'CUSTOM', name:a.n, enName:a.n, color:(a.col||[180,180,180]).slice(), capital:a.cap||0,
-          provList:[], alive:true, gold:0, mp:0, mpCap:0, forceLimit:0, overlord:0, subject:0, allies:[], ruler:'', lx:0, ly:0 };
+          provList:[], alive:true, gold:0, mp:0, mpCap:0, income:0, forceLimit:0, overlord:0, subject:0, allies:[], ruler:'', lx:0, ly:0 };
       while(countries.length<id) countries.push(null);
       countries[id]=c;
     }
@@ -2048,6 +2090,7 @@ function applySaveData(d){
   });
   dayCount=d.dayCount; cal={...d.cal};
   if(d.mapMode) mapMode=d.mapMode;
+  ensureAllCountryFields();       // 读档补建的国家也要补齐字段
   humans=new Set(d.humans||[]);
   logEntries=(d.logs||[]).slice();
   pendingOffers={};
@@ -2097,6 +2140,7 @@ if(typeof module!=='undefined'&&module.exports){
     validateScenario,applyScenario,buildWorldFromScenario,
     addRecruit,pendingStrength,tickRecruits,RECRUIT_DAYS,NAVY_DAYS,foundVassal,
     makeSaveData,applySaveData,pushLog,pushLogTo,pushLogWorld,fmtDate,
+    ensureCountryFields,ensureAllCountryFields,COUNTRY_NUM_FIELDS,
     decodeTopo,buildLand,buildProvinces,buildCountries,rebuildLabels,recomputeCap,totalDev,devOf,
     tickDay,advanceDay,mergeArmies,resolveBattles,resolveSieges,monthlyTick,economy,aiMonthly,
     declareWar,makePeace,transferProvince,checkDeath,vassalize,releaseStaleOccupations,
