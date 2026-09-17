@@ -53,6 +53,58 @@
 
 ---
 
+## 地图工坊
+
+玩家可以自己做地图，通过管理员审核后所有人都能玩。
+
+### 怎么用
+
+1. 开始页 → **🛠 地图编辑器**，左键点省份开始改
+2. 改完点 **⬇ 下载** 存到本地（一份 `.json`），或者点 **📤 提交审核**
+3. 管理员在开始页 → **⚙ 管理** 里审（口令见服务器 `srv/.env`），可以直接**在游戏里预览**这张地图
+4. 通过后出现在 **🗺 地图大厅**，单人开局和联机开房都能选
+
+### 编辑器能改什么
+
+| 类别 | 内容 |
+|---|---|
+| 省份 | 归属（涂地/吸色）、省名、税基/生产/兵源、首府 |
+| 国家 | 国名、旗色（36 色盘）、首都、存亡（把领土划光即灭国） |
+| 军事 | 各省起始驻军与舰队 |
+| 工具 | 画笔国家选择、＋纳入接壤省、撤销（整步回滚）、下载、提交 |
+
+### 数据怎么传（关键设计）
+
+**「地图零传输」这条支柱没有被推翻。** 世界几何仍然由 `world-data.js` + 种子确定性生成，客户端和服务端各自建一份；剧本只记录**相对默认世界改了哪些东西**：
+
+```json
+{ "v": 1, "base": "ne110m", "seed": 987654321,
+  "name": "测试地图", "author": "测试员", "desc": "...",
+  "provinces": { "123": { "o": 44, "t": 5 }, "124": { "n": "天府" } },
+  "countries": { "44": { "n": "巴黎公社", "c": "210,60,60", "cap": 123 },
+                 "177": { "new": 1, "n": "海东国", "c": "200,80,40" } },
+  "armies": [ { "o": 44, "p": 123, "s": 12000 } ] }
+```
+
+一份改了 4 省 2 国的真实剧本只有 **4.8 KB**。两端统一走同一条路径：
+
+```
+resetWorld() → setSeed(seed) → buildWorld() → applyScenario(剧本)
+```
+
+联机时房间把整包剧本随大厅/`begin` 消息下发，客户端按 `scenarioHash`（内容哈希，与键顺序无关）比对，**同一张图不重复重建**，换图才重建。
+
+### 审核与存储
+
+- 地图存在服务器文件系统：`srv/maps/index.json`（元信息 + 审核状态）+ `srv/maps/data/<id>.json`（剧本本体），写入一律「先写临时文件再 rename」
+- 状态：`pending` → `approved` / `rejected`
+- **管理员口令只存在服务器本地** `srv/.env`（`chmod 600`，部署脚本首次运行时随机生成），systemd 用 `EnvironmentFile=` 读取；仓库里没有
+- **没配口令时审核接口整体关闭**（fail closed），不留默认口令
+- 登录后签一个 12 小时有效的 HMAC 令牌，不需要 session 存储；连续输错 8 次锁 10 分钟
+- 提交限流：每 IP 每小时 6 次；单张地图上限 1 MB；待审队列上限 60
+
+---
+
 ## 核心设计
 
 ### 为什么地图不用传输
@@ -218,6 +270,10 @@ node tools/test-recruit-unit.mjs    # 征兵队列
 node tools/test-vassal2-unit.mjs    # 复国 / 建立附庸国
 node tools/test-puppet-unit.mjs     # 傀儡国国体、叛乱倾向、外交配色、改色/改名、分封地图
 node tools/test-occupy-return.mjs   # 占领归还（幽灵占领回归）
+node tools/test-scenario-unit.mjs   # 剧本数据模型（跨端建图一致性、哈希、脏数据）
+node tools/test-editor-unit.mjs     # 地图编辑器（涂地/改属性/撤销/下载/提交）
+node tools/test-maphall-unit.mjs    # 地图大厅 + 管理后台
+node tools/test-maps-api.mjs        # 地图仓库 API + 联机地图下发
 node tools/test-pvp-peace.mjs       # PvP 和谈必须双方同意
 node tools/test-fix3-unit.mjs       # 海路 BFS 与阵营缓存正确性
 node tools/test-fix4-unit.mjs       # 吞并规则与报错可见性

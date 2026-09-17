@@ -18,7 +18,7 @@
     "stop": "npx pm2 stop dynasty-1444",
     "restart": "npx pm2 restart dynasty-1444",
     "logs": "npx pm2 logs dynasty-1444",
-    "test": "node tools/test-core.mjs && node tools/test-client-unit.mjs && node tools/test-perf-unit.mjs && node tools/test-map-ghost.mjs && node tools/test-recruit-unit.mjs && node tools/test-vassal2-unit.mjs && node tools/test-puppet-unit.mjs && node tools/test-occupy-return.mjs && node tools/test-pvp-peace.mjs && node tools/test-fix3-unit.mjs && node tools/test-fix4-unit.mjs && node tools/test-fix5-unit.mjs && node tools/test-newcountry-label.mjs && node tools/test-mp.mjs && node tools/test-puppet-mp.mjs && node tools/test-ally-mp.mjs",
+    "test": "node tools/test-core.mjs && node tools/test-client-unit.mjs && node tools/test-perf-unit.mjs && node tools/test-map-ghost.mjs && node tools/test-recruit-unit.mjs && node tools/test-vassal2-unit.mjs && node tools/test-puppet-unit.mjs && node tools/test-occupy-return.mjs && node tools/test-scenario-unit.mjs && node tools/test-editor-unit.mjs && node tools/test-maphall-unit.mjs && node tools/test-pvp-peace.mjs && node tools/test-fix3-unit.mjs && node tools/test-fix4-unit.mjs && node tools/test-fix5-unit.mjs && node tools/test-newcountry-label.mjs && node tools/test-mp.mjs && node tools/test-puppet-mp.mjs && node tools/test-ally-mp.mjs && node tools/test-maps-api.mjs",
     "test:live": "node tools/test-final.mjs",
     "bench": "node tools/profile-server.mjs"
   }

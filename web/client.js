@@ -874,11 +874,627 @@ function updateTopbar(){
   $('btn-pause').textContent=paused?'▶ 继续':'⏸ 暂停';
 }
 
+/* =====================================================================
+   地图编辑器（剧本编辑）
+   ---------------------------------------------------------------------
+   编辑的是一份"剧本"：只记录相对默认世界改了哪些省/国，所以几 KB 而已。
+   · 完成后「下载」得到一份 .json 存到本地
+   · 想让别人玩，得走「提交审核 → 管理员通过 → 地图大厅」
+   编辑期间世界不推进（paused=true），也不会触发任何 AI。
+   ===================================================================== */
+let editMode={on:false,tool:'select',brush:0,sel:0,undo:[],name:'',author:'',desc:'',dirty:0,busy:false};
+const EDIT_MAX_UNDO=200;
+
+const EDIT_TOOLS=[
+  {k:'select',label:'🔍 选择',  tip:'点省份 → 在右侧编辑它的归属/发展度/省名'},
+  {k:'paint', label:'🖌 涂地',  tip:'点省份 → 立刻归入当前画笔国家'},
+  {k:'pick',  label:'💧 吸色',  tip:'点省份 → 把它的归属国设为当前画笔'},
+  {k:'capital',label:'🏛 定都', tip:'点省份 → 设为当前画笔国家的首都'},
+];
+
+function editBrushCountry(){ return countries[editMode.brush]||null; }
+function editRebuild(){
+  for(let i=1;i<countries.length;i++) if(countries[i]) countries[i].provList=[];
+  for(let i=1;i<provinces.length;i++){
+    const p=provinces[i];
+    if(p.pix.length&&countries[p.owner]) countries[p.owner].provList.push(i);
+  }
+  for(let i=1;i<countries.length;i++){
+    const c=countries[i]; if(!c) continue;
+    c.alive=c.provList.length>0;
+    recomputeCap(c);
+    // 首都没了（或者被划走了）就换一个最大的省
+    if(c.alive&&(!c.capital||!c.provList.includes(c.capital))){
+      let best=c.provList[0], bl=-1;
+      for(const pid of c.provList){ const L=provinces[pid].pix.length; if(L>bl){bl=L; best=pid;} }
+      c.capital=best;
+    }
+    if(!c.alive) c.capital=0;
+  }
+  invalidateCamps();
+  labelsDirty=true;
+  rebuildLabels();
+  recolorAll();
+}
+/* ---- 撤销栈：每次改动前先快照受影响的省/国 ---- */
+function editSnapProv(pid){
+  const p=provinces[pid];
+  return {t:'p',id:pid,o:{owner:p.owner,tax:p.tax,prod:p.prod,man:p.man,name:p.name}};
+}
+function editSnapCountry(cid){
+  const c=countries[cid]; if(!c) return null;
+  return {t:'c',id:cid,o:{name:c.name,color:c.color.slice(),capital:c.capital,gold:c.gold}};
+}
+function editSnapArmies(){
+  return {t:'a',o:armies.map(a=>({o:a.owner,p:a.prov,s:a.str,n:a.isNavy?1:0}))};
+}
+/* 一次用户操作可能同时改动多个省/国（涂地会同时影响原主、新主、该省），
+   撤销必须把它们当成**一步**整体回滚，否则撤一次只回滚其中一个。 */
+function editPushGroup(items){
+  const list=(items||[]).filter(Boolean);
+  if(!list.length) return;
+  editMode.undo.push({t:'g',items:list});
+  if(editMode.undo.length>EDIT_MAX_UNDO) editMode.undo.shift();
+  editMode.dirty++;
+}
+function editApplySnap(s){
+  if(s.t==='p'){ const p=provinces[s.id]; if(p) Object.assign(p,s.o); }
+  else if(s.t==='c'){ const c=countries[s.id]; if(c){ c.name=s.o.name; c.enName=s.o.name; c.color=s.o.color.slice(); c.capital=s.o.capital; c.gold=s.o.gold; } }
+  else if(s.t==='a'){
+    armies=s.o.map((a,i)=>({id:i+1,owner:a.o,prov:a.p,str:a.s,path:[],prog:0,isNavy:a.n}));
+    nextArmy=armies.length+1;
+  }
+}
+function editUndo(){
+  const s=editMode.undo.pop();
+  if(!s){ pushLog('没有可撤销的操作了'); return; }
+  // 按相反顺序回滚：后面的快照可能依赖前面的状态
+  const items=(s.t==='g')?s.items.slice().reverse():[s];
+  for(const it of items) editApplySnap(it);
+  editRebuild(); editRefresh();
+  pushLog('↩ 已撤销一步');
+}
+
+/* ---- 编辑动作 ---- */
+function editPaint(pid){
+  const p=provinces[pid]; if(!p||!p.pix.length) return;
+  const cid=editMode.brush;
+  if(!countries[cid]) return;
+  if(p.owner===cid){ pushLog(`${p.name} 已经属于 ${countries[cid].name}`); return; }
+  editPushGroup([editSnapProv(pid), editSnapCountry(p.owner), editSnapCountry(cid)]);
+  p.owner=cid; p.controller=cid; p.siege=0;
+  editRebuild(); editRefresh();
+}
+function editSetCapital(pid){
+  const c=editBrushCountry(); const p=provinces[pid];
+  if(!c||!p||!p.pix.length) return;
+  if(p.owner!==c.id){ pushLog('首都必须在自己的领土上','war'); return; }
+  editPushGroup([editSnapCountry(c.id)]);
+  c.capital=pid;
+  editRebuild(); editRefresh();
+}
+function editSetOwner(pid,cid){
+  const p=provinces[pid], c=countries[cid];
+  if(!p||!c) return;
+  editPushGroup([editSnapProv(pid), editSnapCountry(p.owner), editSnapCountry(cid)]);
+  p.owner=cid; p.controller=cid; p.siege=0;
+  editRebuild(); editRefresh();
+}
+function editSetDev(pid,field,val){
+  const p=provinces[pid]; if(!p) return;
+  const v=Math.max(1,Math.min(99,Math.round(+val||1)));
+  if(p[field]===v) return;
+  editPushGroup([editSnapProv(pid)]);
+  p[field]=v;
+  const c=countries[p.owner]; if(c) recomputeCap(c);
+  recolorAll(); editRefresh();
+  if(mapMode==='dev') recolorAll();
+}
+function editSetProvName(pid,name){
+  const p=provinces[pid]; if(!p) return;
+  const nm=sanitizeCountryName(name);
+  if(!nm){ pushLog('省名不能为空','war'); return; }
+  editPushGroup([editSnapProv(pid)]);
+  p.name=nm;
+  labelsDirty=true; rebuildLabels(); editRefresh();
+}
+function editSetCountryName(cid,name){
+  const c=countries[cid]; if(!c) return;
+  const nm=sanitizeCountryName(name);
+  if(!nm){ pushLog('国名不能为空','war'); return; }
+  editPushGroup([editSnapCountry(cid)]);
+  c.name=nm; c.enName=nm;
+  labelsDirty=true; rebuildLabels(); editRefresh();
+}
+function editSetCountryColor(cid,rgb){
+  const c=countries[cid]; if(!c) return;
+  if(!Array.isArray(rgb)||rgb.length<3) return;
+  const nums=rgb.slice(0,3).map(Number);
+  if(!nums.every(v=>isFinite(v))) return;      // 含非数字 → 整体拒绝，别算出 NaN 颜色
+  editPushGroup([editSnapCountry(cid)]);
+  c.color=nums.map(v=>Math.max(0,Math.min(255,Math.round(v))));
+  recolorAll(); editRefresh();
+}
+function editAddArmy(pid,str,navy){
+  const p=provinces[pid]; if(!p||!p.pix.length) return;
+  const cid=editMode.brush;
+  if(!countries[cid]) return;
+  const s=Math.max(100,Math.min(200000,Math.round(+str||5000)));
+  editPushGroup([editSnapArmies()]);
+  armies.push({id:nextArmy++, owner:cid, prov:pid, str:s, path:[], prog:0, isNavy:navy?1:0});
+  editRefresh();
+  pushLog(`⚔ 在 ${p.name} 为 ${countries[cid].name} 放置了 ${s} 人的起始军队`);
+}
+function editClearArmies(){
+  if(!armies.length){ pushLog('当前没有起始军队'); return; }
+  editPushGroup([editSnapArmies()]);
+  armies=[]; nextArmy=1;
+  editRefresh();
+  pushLog('已清空全部起始军队');
+}
+/* 把当前画笔国家整块吞掉：它所有省份划给画笔（用于"删掉某个国家"） */
+function editAbsorb(cid){
+  const c=countries[cid]; if(!c||!c.provList.length) return;
+  const to=editMode.brush;
+  if(to===cid) return;
+  const items=[editSnapCountry(cid), editSnapCountry(to)];
+  for(const pid of [...c.provList]){
+    items.push(editSnapProv(pid));            // 必须在改动该省之前取快照
+    const p=provinces[pid]; p.owner=to; p.controller=to; p.siege=0;
+  }
+  editPushGroup(items);
+  editRebuild(); editRefresh();
+  pushLog(`${c.name} 的全部领土已划归 ${countries[to].name}`);
+}
+
+/* ---- 地图交互 ---- */
+function editMapClick(pid){
+  const p=provinces[pid];
+  if(!p||!p.pix.length) return true;         // 编辑模式下点海面什么都不做
+  selectedProv=pid;
+  const t=editMode.tool;
+  if(t==='paint') editPaint(pid);
+  else if(t==='pick'){ editMode.brush=p.owner||editMode.brush; updateEditBar(); editRefresh(); }
+  else if(t==='capital') editSetCapital(pid);
+  else editRefresh();
+  return true;
+}
+
+/* ---- 顶部工具条 ---- */
+function updateEditBar(){
+  const bar=$('editbar'); if(!bar) return;
+  if(!editMode.on){ bar.classList.add('hidden'); bar.innerHTML=''; return; }
+  bar.classList.remove('hidden');
+  const b=editBrushCountry();
+  const tools=EDIT_TOOLS.map(t=>
+    `<button class="act${editMode.tool===t.k?' on':''}" data-act="edit-tool" data-v="${t.k}" title="${t.html||t.tip||''}">${t.label}</button>`).join('');
+  const total=Object.keys(makeScenarioQuiet().provinces).length;
+  const ctotal=Object.keys(makeScenarioQuiet().countries).length;
+  bar.innerHTML=`
+    <b style="color:#ffd890;white-space:nowrap">🗺 地图编辑器</b>
+    <button class="act" data-act="edit-info" title="填写地图名称、作者与简介">📝 ${escHtml(editMode.name||'未命名地图')}</button>
+    <span class="sep2"></span>
+    ${tools}
+    <span class="sep2"></span>
+    <span class="hint" style="white-space:nowrap">画笔：</span>
+    <span class="cd" style="display:inline-block;width:12px;height:12px;background:rgb(${b?b.color.map(v=>v|0).join(','):'120,120,120'});border:1px solid #000"></span>
+    <select id="edit-brush" title="选择要涂成哪个国家">${editBrushOptions()}</select>
+    <span class="sep2"></span>
+    <button class="act" data-act="edit-undo" title="撤销上一步">↩ 撤销</button>
+    <button class="act" data-act="edit-clear-armies" title="清空全部起始军队">🧹 清空军队</button>
+    <span class="sep2"></span>
+    <span class="hint" style="white-space:nowrap">已改 ${total} 省 / ${ctotal} 国</span>
+    <button class="act" style="background:#1c3320;border-color:#509060;color:#a8e0b0" data-act="edit-download" title="把这张地图保存成 .json 下载到本地">⬇ 下载</button>
+    <button class="act" style="background:#2a2440;border-color:#6a5a9a;color:#d0b0ff" data-act="edit-submit" title="提交给管理员审核，通过后会出现在地图大厅">📤 提交审核</button>
+    <button class="act" data-act="edit-exit" title="放弃编辑并返回">✕ 退出</button>`;
+  const sel=$('edit-brush');
+  if(sel) sel.value=String(editMode.brush);
+}
+/* 结算当前改动量（不产生副作用；makeScenario 只读不写） */
+function makeScenarioQuiet(){
+  try{ return makeScenario({name:editMode.name, author:editMode.author, desc:editMode.desc}); }
+  catch(e){ return {countries:{},provinces:{},armies:[]}; }
+}
+function editBrushOptions(){
+  const list=[...countries].filter(c=>c).sort((a,b)=>{
+    if(a.alive!==b.alive) return a.alive?-1:1;
+    if(a.provList.length!==b.provList.length) return b.provList.length-a.provList.length;
+    return a.name.localeCompare(b.name);
+  });
+  return list.map(c=>`<option value="${c.id}"${c.id===editMode.brush?' selected':''}>${escHtml(c.name)}（${c.provList.length}省${c.alive?'':',已亡'}）</option>`).join('');
+}
+
+/* ---- 右侧编辑面板 ---- */
+function editPanel(){
+  let h=`<div class="ehint">点地图上的省份来编辑。当前工具：<b>${(EDIT_TOOLS.find(t=>t.k===editMode.tool)||{}).label||''}</b></div>`;
+  const p=selectedProv>0?provinces[selectedProv]:null;
+  if(p&&p.pix.length){
+    const ow=countries[p.owner];
+    h+=`<div class="sep"></div><h3>${escHtml(p.name)}</h3>
+      <div class="row"><span>当前归属</span>
+        <span class="cd" style="display:inline-block;width:11px;height:11px;background:rgb(${ow?ow.color.map(v=>v|0).join(','):'120,120,120'});border:1px solid #000;vertical-align:middle"></span>
+        ${ow?escHtml(ow.name):'无主'}</div>
+      <div><button class="act" data-act="edit-paint-here" data-v="${p.id}" title="把该省划给当前画笔国家">🖌 划给画笔国家</button>
+           <button class="act" data-act="edit-capital-here" data-v="${p.id}" title="设为画笔国家的首都">🏛 设为画笔首都</button></div>
+      <div class="sep"></div>
+      <h4>发展度</h4>
+      <div class="row"><span>税基</span><input class="ednum" type="number" min="1" max="99" value="${p.tax}" data-act="edit-dev" data-f="tax" data-v="${p.id}"></div>
+      <div class="row"><span>生产</span><input class="ednum" type="number" min="1" max="99" value="${p.prod}" data-act="edit-dev" data-f="prod" data-v="${p.id}"></div>
+      <div class="row"><span>兵源</span><input class="ednum" type="number" min="1" max="99" value="${p.man}" data-act="edit-dev" data-f="man" data-v="${p.id}"></div>
+      <h4>省名</h4>
+      <div class="row"><input id="edit-pname" type="text" maxlength="12" value="${escHtml(p.name)}" style="flex:1"><button class="act" data-act="edit-pname-set" data-v="${p.id}">改名</button></div>
+      <div class="sep"></div>
+      <h4>起始军队</h4>
+      <div class="row"><span>兵力</span><input class="ednum" id="edit-army-str" type="number" min="100" max="200000" step="500" value="5000">
+        <button class="act" data-act="edit-army-add" data-v="${p.id}">⚔ 放置陆军</button>
+        <button class="act" data-act="edit-army-add-navy" data-v="${p.id}" title="需要海岸省份">⛵ 放置舰队</button></div>
+      <div class="hint">放在该省的军队会归当前画笔国家所有。</div>`;
+  } else {
+    h+=`<div class="sep"></div><p class="hint">还没有选中省份。左键点地图上任一省份开始编辑。</p>`;
+  }
+  /* 画笔国家编辑 */
+  const b=editBrushCountry();
+  if(b){
+    h+=`<div class="sep"></div><h3>画笔国家 · ${escHtml(b.name)}</h3>
+      <div class="row"><span>国名</span><input id="edit-cname" type="text" maxlength="12" value="${escHtml(b.name)}" style="flex:1"><button class="act" data-act="edit-cname-set">改名</button></div>
+      <div class="row"><span>旗色</span></div>
+      <div class="swatches" style="max-width:100%">${
+        (()=>{ let sw=''; for(const L of [0.36,0.5,0.64]) for(let i=0;i<12;i++){
+          const rgb=hsl(i/12,0.58,L).map(v=>Math.round(v));
+          const sel=b.color.every((v,k)=>Math.abs(v-rgb[k])<3);
+          sw+=`<button class="sw${sel?' sel':''}" data-act="edit-ccolor" data-v="${b.id}" data-rgb="${rgb.join(',')}" style="background:rgb(${rgb.join(',')})"></button>`;
+        } return sw; })()
+      }</div>
+      <div class="row"><span>首都</span>${b.capital?escHtml(provinces[b.capital].name):'—'} · 共 ${b.provList.length} 省</div>
+      <div><button class="act danger" data-act="edit-absorb" data-v="${b.id}" title="把该国其余省份全部划给…（慎用）">⚠ 该国并入他国</button></div>
+      <div class="hint">「该国并入他国」会把它的全部领土交给当前选中的另一个国家，用来删掉不想要的国家。</div>`;
+  }
+  return h;
+}
+
+function editRefresh(){ updateEditBar(); if(editMode.on) refreshPanel(); }
+
+/* ---- 进入 / 退出 ---- */
+function openEditor(){
+  MP.online=false;
+  resetWorld(); setSeed(SCENARIO_SEED); buildWorld();
+  captureScenarioBase();
+  player=0; started=true; paused=true; speed=2;
+  selectedProv=0; selectedArmy=0;
+  const first=countries.find(c=>c&&c.alive&&c.provList.length>4);
+  editMode={on:true,tool:'select',brush:first?first.id:1,sel:0,undo:[],name:'未命名地图',author:'',desc:'',dirty:0,busy:false};
+  $('selectmodal').classList.add('hidden');
+  $('topbar').classList.remove('hidden');
+  $('modebar').classList.remove('hidden');
+  $('sidepanel').classList.remove('hidden');
+  $('logpanel').classList.remove('hidden');
+  setMode('political');
+  updateTopbar(); updateEditBar(); recolorAll(); rebuildLabels(); refreshPanel(); renderLog();
+  pushLog('🗺 已进入地图编辑器。左键点省份选中，「涂地」工具下点击即划归画笔国家；完成后「⬇ 下载」保存到本地，或「📤 提交审核」上线。','gold');
+}
+function closeEditor(){
+  editMode.on=false;
+  updateEditBar();
+  $('topbar').classList.add('hidden');
+  $('modebar').classList.add('hidden');
+  $('sidepanel').classList.add('hidden');
+  $('logpanel').classList.add('hidden');
+  started=false; player=0;
+  $('selectmodal').classList.remove('hidden');
+  refreshStartLoadBtn();
+  renderSelectList('');
+}
+
+/* ---- 地图信息 ---- */
+function editInfoDialog(){
+  const nm=prompt('地图名称（最多 24 字）：', editMode.name==='未命名地图'?'':editMode.name);
+  if(nm===null) return;
+  const au=prompt('作者署名（最多 16 字，可留空）：', editMode.author||'');
+  if(au===null) return;
+  const de=prompt('一句话简介（最多 160 字，可留空）：', editMode.desc||'');
+  if(de===null) return;
+  editMode.name=sanitizeMapText(nm,MAP_NAME_MAX)||'未命名地图';
+  editMode.author=sanitizeMapText(au,MAP_AUTHOR_MAX);
+  editMode.desc=sanitizeMapText(de,MAP_DESC_MAX);
+  editRefresh();
+}
+/* ---- 下载到本地 ---- */
+function editDownload(){
+  const sc=makeScenario({name:editMode.name,author:editMode.author,desc:editMode.desc});
+  const text=JSON.stringify(sc);
+  const fn=(sanitizeMapText(editMode.name,MAP_NAME_MAX)||'map').replace(/[\\/:*?"<>|\s]+/g,'_')+'.dynasty-map.json';
+  try{
+    const blob=new Blob([text],{type:'application/json'});
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(blob); a.download=fn;
+    document.body.appendChild(a); a.click();
+    setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); },0);
+    pushLog(`⬇ 已下载「${editMode.name}」（${text.length} 字节）到本地`,'gold');
+  }catch(e){ pushLog('浏览器不允许直接下载，已把内容打印到日志','war'); pushLog(text); }
+}
+/* ---- 提交审核 ---- */
+async function editSubmit(){
+  if(editMode.busy) return;
+  const sc=makeScenario({name:editMode.name,author:editMode.author,desc:editMode.desc});
+  if(!Object.keys(sc.provinces).length&&!Object.keys(sc.countries).length){
+    pushLog('这张地图还没有任何改动，先编辑一下再提交','war'); return;
+  }
+  if(editMode.name==='未命名地图'||!editMode.name){
+    pushLog('请先点「📝 未命名地图」填写地图名称','war'); editInfoDialog(); return;
+  }
+  editMode.busy=true;
+  pushLog('正在提交，请稍候……');
+  try{
+    // 独立域名挂在根路径、IP 站点挂在 /gs/ 下，两种入口都要能取到 API
+    const base=(location.pathname.replace(/[^/]*$/,'')||'/').replace(/\/$/,'');
+    const r=await fetch(base+'/api/maps',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({meta:{name:editMode.name,author:editMode.author,desc:editMode.desc},scenario:sc}),
+    });
+    const j=await r.json().catch(()=>({ok:false,err:'服务器返回了无法解析的内容'}));
+    if(j.ok){
+      pushLog(`📤 提交成功！编号 ${j.id}，等待管理员审核。通过后会出现在「地图大厅」。`,'gold');
+    } else {
+      pushLog('提交失败：'+(j.err||('HTTP '+r.status)),'war');
+    }
+  }catch(e){
+    pushLog('提交失败：'+e.message,'war');
+  }
+  editMode.busy=false;
+}
+
+/* =====================================================================
+   地图大厅
+   ---------------------------------------------------------------------
+   列出管理员审核通过的自定义地图。选中一张 → 拉取剧本 → 在本地建出世界 →
+   回到选国界面。之后无论是单人开局还是联机开房，用的都是这张地图。
+   ===================================================================== */
+let hallMaps=[], hallFilter='', hallLoading=false;
+/* 当前选用的自定义地图；null = 官方默认世界 */
+let currentMap=null;
+
+function apiBase(){
+  return (location.pathname.replace(/[^/]*$/,'')||'/').replace(/\/$/,'');
+}
+async function apiGet(path){
+  const r=await fetch(apiBase()+path,{headers:{'Accept':'application/json'}});
+  const j=await r.json().catch(()=>null);
+  if(!j) throw new Error('服务器返回了无法解析的内容（HTTP '+r.status+'）');
+  return j;
+}
+
+async function openMapHall(){
+  $('selectmodal').classList.add('hidden');
+  $('hallmodal').classList.remove('hidden');
+  $('hall-list').innerHTML='<p class="hint">正在读取地图列表……</p>';
+  try{
+    const j=await apiGet('/api/maps');
+    hallMaps=(j&&j.maps)||[];
+  }catch(e){
+    hallMaps=[];
+    $('hall-list').innerHTML=`<p class="hint" style="color:#ff9080">读取失败：${escHtml(e.message)}</p>`;
+    return;
+  }
+  renderHallList();
+}
+function closeMapHall(){
+  $('hallmodal').classList.add('hidden');
+  $('selectmodal').classList.remove('hidden');
+}
+function renderHallList(){
+  const q=hallFilter.trim().toLowerCase();
+  const list=hallMaps.filter(m=>!q||(m.name||'').toLowerCase().includes(q)||(m.author||'').toLowerCase().includes(q));
+  let h=`<div class="c-row" data-act="hall-official" title="回到原始的世界地图">
+    <span class="cd" style="background:linear-gradient(90deg,#4a7a4a,#3a5a8a)"></span>
+    <span class="cn"><b>官方地图</b> <span class="badge peace">默认</span></span>
+    <span class="cs">Natural Earth 110m · 2007 省 / 177 国</span>
+  </div>`;
+  if(!list.length){
+    h+=`<p class="hint" style="margin-top:10px">${hallMaps.length?'没有匹配的地图。':'还没有人提交过地图。你可以用「🛠 地图编辑器」做一张，然后提交审核。'}</p>`;
+  }
+  for(const m of list){
+    const kb=(m.size/1024).toFixed(1);
+    const dt=(m.createdAt||'').slice(0,10);
+    h+=`<div class="c-row" data-act="hall-pick" data-v="${m.id}" title="作者：${escHtml(m.author||'匿名')}">
+      <span class="cd" style="background:#6a5a9a"></span>
+      <span class="cn"><b>${escHtml(m.name)}</b> <span class="hint">by ${escHtml(m.author||'匿名')}</span></span>
+      <span class="cs">${m.provinces||0} 省改动 · ${kb}KB · ▶${m.plays||0} · ${dt}</span>
+    </div>
+    ${m.desc?`<div class="hint" style="margin:-4px 0 6px 25px">${escHtml(m.desc)}</div>`:''}`;
+  }
+  $('hall-list').innerHTML=h;
+}
+/* 选用官方默认地图 */
+function useOfficialMap(){
+  currentMap=null;
+  closeMapHall();
+  resetWorld(); setSeed(SCENARIO_SEED); buildWorld();
+  renderSelectList('');
+  updateMapBadge();
+}
+async function pickHallMap(id){
+  if(hallLoading) return;
+  hallLoading=true;
+  $('hall-list').innerHTML='<p class="hint">正在下载地图……</p>';
+  try{
+    const j=await apiGet('/api/maps/'+encodeURIComponent(id));
+    if(!j.ok) throw new Error(j.err||'取图失败');
+    const err=buildWorldFromScenario(j.scenario);
+    if(err) throw new Error(err);
+    currentMap={id, name:j.meta.name, author:j.meta.author, hash:j.meta.hash, scenario:j.scenario};
+    closeMapHall();
+    renderSelectList('');
+    updateMapBadge();
+    pushLog(`🗺 已选用地图《${j.meta.name}》（${j.meta.author||'匿名'}）· 共 ${Object.keys(j.scenario.provinces||{}).length} 处省份改动`,'gold');
+    // 记一次游玩
+    fetch(apiBase()+'/api/maps/'+encodeURIComponent(id)+'/play',{method:'POST'}).catch(()=>{});
+  }catch(e){
+    $('hall-list').innerHTML=`<p class="hint" style="color:#ff9080">加载失败：${escHtml(e.message)}</p>`;
+  }
+  hallLoading=false;
+}
+/* 选国界面顶部显示当前用的哪张地图 */
+function updateMapBadge(){
+  const el=$('map-badge'); if(!el) return;
+  if(currentMap){
+    el.innerHTML=`🗺 当前地图：<b style="color:#d0b0ff">${escHtml(currentMap.name)}</b> <span class="hint">by ${escHtml(currentMap.author||'匿名')}</span>
+      <button class="act" style="margin-left:8px;padding:2px 8px;font-size:11px" data-act="map-hall">换一张</button>`;
+    el.style.display='';
+  } else {
+    el.innerHTML=`🗺 当前地图：<b>官方地图</b>
+      <button class="act" style="margin-left:8px;padding:2px 8px;font-size:11px" data-act="map-hall">地图大厅</button>`;
+    el.style.display='';
+  }
+}
+
+/* =====================================================================
+   地图审核后台（管理员）
+   ---------------------------------------------------------------------
+   入口在开始页；口令由服务端 MAP_ADMIN_PASS 决定，没配就整体不可用。
+   预览直接复用游戏自己的渲染：把剧本套到背景世界再画出来，
+   比任何文字描述都直观。审完「返回列表」会恢复原来的地图。
+   ===================================================================== */
+let adminTok='', adminTab='pending', adminPvId='', adminRestore=null;
+
+function openAdmin(){
+  $('lobby').classList.add('hidden');
+  $('adminmodal').classList.remove('hidden');
+  $('admin-msg').textContent='';
+  // 会话内已登录就直接进主界面
+  if(adminTok&&window.sessionStorage){
+    $('admin-login').classList.add('hidden');
+    $('admin-main').classList.remove('hidden');
+    loadAdminList();
+  } else {
+    $('admin-login').classList.remove('hidden');
+    $('admin-main').classList.add('hidden');
+  }
+  $('admin-preview').classList.add('hidden');
+}
+function closeAdmin(){
+  if(adminPvId) adminStopPreview();
+  $('adminmodal').classList.add('hidden');
+  $('lobby').classList.remove('hidden');
+}
+async function adminLogin(){
+  const pass=$('admin-pass')?$('admin-pass').value:'';
+  $('admin-msg').textContent='正在登录……';
+  try{
+    const r=await fetch(apiBase()+'/api/admin/login',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pass})});
+    const j=await r.json().catch(()=>null);
+    if(!j||!j.ok){ $('admin-msg').textContent=(j&&j.err)||'登录失败'; return; }
+    adminTok=j.token;
+    try{ sessionStorage.setItem('gs_admin_tok',adminTok); }catch(e){}
+    $('admin-msg').textContent='';
+    $('admin-login').classList.add('hidden');
+    $('admin-main').classList.remove('hidden');
+    loadAdminList();
+  }catch(e){ $('admin-msg').textContent='登录失败：'+e.message; }
+}
+function adminLogout(){
+  adminTok='';
+  try{ sessionStorage.removeItem('gs_admin_tok'); }catch(e){}
+  $('admin-main').classList.add('hidden');
+  $('admin-login').classList.remove('hidden');
+}
+function adminHeaders(){ return {'Content-Type':'application/json','x-admin-token':adminTok}; }
+async function loadAdminList(){
+  $('admin-list').innerHTML='<p class="hint">读取中……</p>';
+  try{
+    const r=await fetch(apiBase()+'/api/admin/maps?status='+encodeURIComponent(adminTab),{headers:adminHeaders()});
+    const j=await r.json().catch(()=>null);
+    if(!j||!j.ok){ $('admin-list').innerHTML=`<p class="hint" style="color:#ff9080">${escHtml((j&&j.err)||'读取失败')}</p>`; return; }
+    const st=j.stats||{};
+    $('admin-stats').textContent=`共 ${st.total||0} 张 · 待审 ${st.pending||0} · 已上线 ${st.approved||0}`;
+    const list=j.maps||[];
+    if(!list.length){ $('admin-list').innerHTML='<p class="hint">这里还没有地图。</p>'; return; }
+    $('admin-list').innerHTML=list.map(m=>{
+      const kb=(m.size/1024).toFixed(1), dt=(m.createdAt||'').replace('T',' ').slice(0,16);
+      return `<div class="c-row" data-act="admin-preview" data-v="${m.id}" title="点击预览这张地图">
+        <span class="cd" style="background:#6a5a9a"></span>
+        <span class="cn"><b>${escHtml(m.name)}</b> <span class="hint">by ${escHtml(m.author||'匿名')}</span></span>
+        <span class="cs">${m.provinces||0} 省改动 · ${m.countries||0} 国改动 · ${kb}KB · ${dt} · ▶${m.plays||0}</span>
+      </div>
+      ${m.desc?`<div class="hint" style="margin:-4px 0 6px 25px">${escHtml(m.desc)}</div>`:''}`;
+    }).join('');
+  }catch(e){ $('admin-list').innerHTML=`<p class="hint" style="color:#ff9080">${escHtml(e.message)}</p>`; }
+}
+/* 预览：把这张地图套到背景世界并画出来 */
+async function adminPreview(id){
+  if(adminRestore===null) adminRestore=currentMap;   // 记住原来用的地图
+  $('admin-list').innerHTML='<p class="hint">正在载入地图……</p>';
+  let j=null;
+  try{
+    const r=await fetch(apiBase()+'/api/admin/maps/'+encodeURIComponent(id),{headers:adminHeaders()});
+    j=await r.json().catch(()=>null);
+  }catch(e){}
+  if(!j||!j.ok){ $('admin-list').innerHTML=`<p class="hint" style="color:#ff9080">${escHtml((j&&j.err)||'载入失败')}</p>`; return; }
+  const err=buildWorldFromScenario(j.scenario);
+  if(err){ $('admin-list').innerHTML=`<p class="hint" style="color:#ff9080">这张地图无法载入：${escHtml(err)}</p>`; return; }
+  adminPvId=id;
+  $('admin-main').classList.add('hidden');
+  $('admin-preview').classList.remove('hidden');
+  $('adminmodal').classList.add('hidden');       // 让出屏幕看图
+  const m=j.meta;
+  $('admin-pv-name').textContent=`${m.name}${m.author?'（'+m.author+'）':''}`;
+  $('admin-pv-info').innerHTML=`状态 <b>${j.status}</b> · ${Object.keys(j.scenario.provinces||{}).length} 省改动 · ${Object.keys(j.scenario.countries||{}).length} 国改动 · 编号 ${m.id} · 哈希 ${m.hash}
+    ${j.note?`<br>上次审核备注：${escHtml(j.note)}`:''}`;
+  recolorAll(); rebuildLabels();
+  const alive=countries.filter(c=>c&&c.alive);
+  let big=alive.slice().sort((a,b)=>totalDev(b)-totalDev(a))[0];
+  if(big&&provinces[big.capital]){ cam.x=provinces[big.capital].cx; cam.y=provinces[big.capital].cy; cam.z=2; }
+  pushLog(`🔎 正在预览地图《${m.name}》—— 审完后点「返回列表」恢复`,'gold');
+}
+/* 预览结束：恢复原来的地图 */
+function adminStopPreview(){
+  if(adminRestore===null) adminRestore=null;
+  if(adminRestore&&adminRestore.scenario){
+    buildWorldFromScenario(adminRestore.scenario);
+    currentMap=adminRestore;
+  } else {
+    resetWorld(); setSeed(SCENARIO_SEED); buildWorld();
+    currentMap=null;
+  }
+  adminRestore=null;
+  adminPvId='';
+  recolorAll(); rebuildLabels(); updateMapBadge();
+  $('admin-preview').classList.add('hidden');
+  $('admin-main').classList.remove('hidden');
+  $('adminmodal').classList.remove('hidden');
+  loadAdminList();
+}
+async function adminReview(action){
+  if(!adminPvId) return;
+  const note=action==='reject'?(prompt('拒绝理由（会展示给提交者，可留空）：','')||''):'';
+  try{
+    const r=await fetch(apiBase()+'/api/admin/review',{
+      method:'POST',headers:adminHeaders(),body:JSON.stringify({id:adminPvId,action,note})});
+    const j=await r.json().catch(()=>null);
+    if(!j||!j.ok){ alert((j&&j.err)||'操作失败'); return; }
+    pushLog(action==='approve'?`✅ 地图已通过审核并上线`:`❌ 地图已被拒绝`,'gold');
+    adminStopPreview();
+  }catch(e){ alert('操作失败：'+e.message); }
+}
+async function adminDelete(){
+  if(!adminPvId) return;
+  if(!confirm('确定要永久删除这张地图吗？（不可恢复）')) return;
+  try{
+    const r=await fetch(apiBase()+'/api/admin/delete',{
+      method:'POST',headers:adminHeaders(),body:JSON.stringify({id:adminPvId})});
+    const j=await r.json().catch(()=>null);
+    if(!j||!j.ok){ alert((j&&j.err)||'删除失败'); return; }
+    pushLog('🗑 地图已删除','war');
+    adminStopPreview();
+  }catch(e){ alert('删除失败：'+e.message); }
+}
+
 function refreshPanel(){
   if(!started) return;
   _panelDraws++;
   _panelSig=panelSignature();   // 记录本次渲染对应的状态指纹
   const b=$('panel-body');
+  if(editMode.on){ b.innerHTML=editPanel(); updateTopbar(); return; }
   if(uiTab==='info') b.innerHTML=infoTab();
   else if(uiTab==='diplo'){
     if(_imeComposing){
@@ -1327,6 +1943,42 @@ document.addEventListener('click',e=>{
     case 'vcolor-random': setVassalColor(+v, hsl(Math.random(),0.58,0.5).map(x=>Math.round(x))); break;
     case 'vcolor-close': diploColorFor=0; refreshPanel(); break;
     case 'rename-self': renameSelf(); break;
+    /* ---- 地图编辑器 ---- */
+    case 'open-editor': openEditor(); break;
+    /* ---- 地图大厅 ---- */
+    case 'map-hall': openMapHall(); break;
+    case 'hall-close': closeMapHall(); break;
+    case 'hall-official': useOfficialMap(); break;
+    case 'hall-pick': pickHallMap(v); break;
+    /* ---- 管理后台 ---- */
+    case 'open-admin': openAdmin(); break;
+    case 'admin-close': closeAdmin(); break;
+    case 'admin-login': adminLogin(); break;
+    case 'admin-logout': adminLogout(); break;
+    case 'admin-tab': adminTab=v||'pending'; loadAdminList(); break;
+    case 'admin-preview': adminPreview(v); break;
+    case 'admin-pv-back': adminStopPreview(); break;
+    case 'admin-pv-approve': adminReview('approve'); break;
+    case 'admin-pv-reject': adminReview('reject'); break;
+    case 'admin-pv-delete': adminDelete(); break;
+    case 'edit-exit': {
+      if(editMode.undo.length && !confirm('退出会丢失本次未下载的编辑，确定吗？')) break;
+      closeEditor(); break;
+    }
+    case 'edit-tool': editMode.tool=v; updateEditBar(); refreshPanel(); break;
+    case 'edit-info': editInfoDialog(); break;
+    case 'edit-undo': editUndo(); break;
+    case 'edit-download': editDownload(); break;
+    case 'edit-submit': editSubmit(); break;
+    case 'edit-clear-armies': editClearArmies(); break;
+    case 'edit-paint-here': editPaint(+v); break;
+    case 'edit-capital-here': editSetCapital(+v); break;
+    case 'edit-pname-set': { const i=$('edit-pname'); if(i) editSetProvName(+v,i.value); break; }
+    case 'edit-cname-set': { const i=$('edit-cname'); if(i) editSetCountryName(editMode.brush,i.value); break; }
+    case 'edit-ccolor': editSetCountryColor(+v, String(el.dataset.rgb||'').split(',').map(Number)); break;
+    case 'edit-absorb': editAbsorb(+v); break;
+    case 'edit-army-add': { const i=$('edit-army-str'); editAddArmy(+v, i?i.value:5000, false); break; }
+    case 'edit-army-add-navy': { const i=$('edit-army-str'); editAddArmy(+v, i?i.value:5000, true); break; }
     case 'diplo-info': diploFocus=diploFocus===+v?0:+v; refreshPanel(); break;
     case 'diplo-focus': diploFocus=+v; refreshPanel(); break;
     case 'peace-ask': peaceAsk(+v); break;
@@ -1376,6 +2028,17 @@ document.addEventListener('input',e=>{
   if(_imeComposing) return; // IME 组字中：只更新变量，不重渲染
   if(e.target.id==='diplo-search'){ uiSearch=e.target.value; refreshPanel(); const s=$('diplo-search'); if(s){s.focus();s.setSelectionRange(s.value.length,s.value.length);} }
   if(e.target.id==='sel-search') renderSelectList(e.target.value);
+  if(e.target.id==='hall-search'){ hallFilter=e.target.value; renderHallList(); }
+});
+/* 编辑器的数字输入（发展度 / 起始兵力）用 change，避免每敲一位就重画地图 */
+document.addEventListener('change',e=>{
+  const t=e.target;
+  if(!t||!editMode.on) return;
+  if(t.id==='edit-brush'){ editMode.brush=+t.value||editMode.brush; updateEditBar(); refreshPanel(); return; }
+  if(t.dataset&&t.dataset.act==='edit-dev'){
+    editSetDev(+t.dataset.v, t.dataset.f, t.value);
+    updateEditBar();
+  }
 });
 
 function doDevelop(pid){
@@ -1787,7 +2450,8 @@ function handleClick(sx,sy){
   let pid=0;
   if(c>=0&&c<COLS&&r>=0&&r<ROWS) pid=provOf[r*COLS+c];
   if(pid){
-    // 割地/分封地图模式：点中省份 → 切换选择（不触发选省/行军）
+    // 编辑器 / 割地 / 分封 三种地图模式优先拦下点击
+    if(editMode.on){ editMapClick(pid); return; }
     if(grantMapToggle(pid)) return;
     if(cedeMapClick(pid)) return;
     const a=armies.find(x=>x.id===selectedArmy);
@@ -2021,10 +2685,13 @@ const tickAsync=()=>new Promise(r=>setTimeout(r,20));
 
     $('lobby').classList.remove('hidden');
     lbShow('entry');
+    updateMapBadge();
+    try{ const t=sessionStorage.getItem('gs_admin_tok'); if(t) adminTok=t; }catch(e){}
     try{ const q=new URLSearchParams(location.search);
       if(q.get('room')){ $('lb-code').value=q.get('room'); lbShow('entry'); }
       if(q.get('solo')!==null&&q.get('solo')!==undefined&&q.get('solo')!=='') mpSolo();
       if(q.get('perf')) perfHud=true;
+      if(q.get('admin')) openAdmin();
     }catch(e){}
     if(!resumed) lbMsg('');
     requestAnimationFrame(loop);

@@ -82,6 +82,20 @@ canvas#map.dragging{cursor:grabbing}
   padding:7px 12px;font-size:12px;box-shadow:0 4px 18px rgba(0,0,0,.55)}
 #grantbar.hidden{display:none}
 #grantbar button.act{padding:4px 10px;font-size:12px;margin:0}
+/* ---------- 地图编辑器工具条 ---------- */
+#editbar{position:absolute;left:8px;right:8px;top:46px;z-index:17;
+  display:flex;align-items:center;gap:5px;flex-wrap:wrap;
+  background:rgba(22,19,28,.95);border:1px solid #6a5a9a;border-radius:4px;
+  padding:6px 10px;font-size:12px;box-shadow:0 4px 18px rgba(0,0,0,.55)}
+#editbar.hidden{display:none}
+#editbar button.act{padding:3px 9px;font-size:12px;margin:0;background:#2a2440;border-color:#5a4a8a;color:#d8ccff}
+#editbar button.act:hover{background:#3a3155}
+#editbar button.act.on{background:#6a5a9a;border-color:#b0a0ff;color:#fff}
+#editbar select{background:#1c2430;color:#d8d0c0;border:1px solid #607080;border-radius:3px;padding:3px 4px;font-size:12px;max-width:190px}
+#editbar .sep2{width:1px;height:18px;background:#4a4260;margin:0 3px}
+#panel-body .ednum{width:64px;background:#1c2430;color:#ffd890;border:1px solid #607080;border-radius:3px;padding:2px 4px;font-size:12px;text-align:right}
+#panel-body .ehint{color:#c9b6ff;background:rgba(106,90,154,.18);border:1px solid #4a4260;border-radius:3px;padding:5px 7px;font-size:12px;line-height:1.6}
+#panel-body input[type=text]{background:#1c2430;color:#e8dcc0;border:1px solid #607080;border-radius:3px;padding:3px 5px;font-size:12px}
 /* ---------- 日志 ---------- */
 #logpanel{position:absolute;left:8px;bottom:8px;width:330px;max-height:180px;z-index:14;background:rgba(16,15,12,.88);border:1px solid #3a3222;border-radius:3px;padding:6px 8px;overflow-y:auto;font-size:11.5px;line-height:1.5}
 #logpanel::-webkit-scrollbar{width:6px}
@@ -201,6 +215,8 @@ kbd{background:#2c271e;border:1px solid #55492c;border-radius:2px;padding:0 4px;
 
 <div id="grantbar" class="hidden"></div>
 
+<div id="editbar" class="hidden"></div>
+
 <div id="selectmodal" class="modal hidden">
   <div class="mbox">
     <div class="mhead"><h2>选择你的王朝</h2><p>公元1444年11月11日 · 世界群雄并起，选择一个国家开始你的霸业</p></div>
@@ -208,8 +224,62 @@ kbd{background:#2c271e;border:1px solid #55492c;border-radius:2px;padding:0 4px;
       <input type="text" id="sel-search" placeholder="搜索国家……">
       <div id="sel-list" style="max-height:340px;overflow-y:auto"></div>
       <div style="margin-top:10px;text-align:right">
+        <button class="act" data-act="map-hall" style="margin-right:10px">🗺 地图大厅</button>
+        <button class="act" data-act="open-editor" style="margin-right:10px">🛠 地图编辑器</button>
         <button class="act" id="btn-start-load" data-act="load" style="display:none;margin-right:10px">📜 读取存档</button>
         <button class="act" data-act="random-start">听天由命（随机）</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="hallmodal" class="modal hidden">
+  <div class="mbox">
+    <div class="mhead"><h2>地图大厅</h2><p>这里是通过管理员审核的自定义地图。选一张，再挑你要玩的国家。</p></div>
+    <div class="mbody">
+      <input type="text" id="hall-search" placeholder="搜索地图名 / 作者……">
+      <div id="hall-list" style="max-height:340px;overflow-y:auto"></div>
+      <div style="margin-top:10px;text-align:right">
+        <button class="act" data-act="hall-close">返回</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="adminmodal" class="modal hidden">
+  <div class="mbox" style="width:680px">
+    <div class="mhead"><h2>地图审核后台</h2><p>审核玩家提交的地图。通过后会出现在「地图大厅」。</p></div>
+    <div class="mbody">
+      <div id="admin-login">
+        <h4>管理员口令</h4>
+        <div class="lb-row">
+          <input type="password" id="admin-pass" placeholder="请输入管理员口令" style="flex:1">
+          <button class="act" data-act="admin-login">登录</button>
+        </div>
+        <div id="admin-msg" class="hint"></div>
+      </div>
+      <div id="admin-main" class="hidden">
+        <div class="lb-row" style="align-items:center">
+          <button class="act" data-act="admin-tab" data-v="pending">⏳ 待审核</button>
+          <button class="act" data-act="admin-tab" data-v="approved">✅ 已上线</button>
+          <span class="spacer" style="flex:1"></span>
+          <button class="act" data-act="admin-logout">退出登录</button>
+          <button class="act" data-act="admin-close">关闭</button>
+        </div>
+        <div id="admin-stats" class="hint" style="margin:6px 0"></div>
+        <div id="admin-list" style="max-height:320px;overflow-y:auto"></div>
+      </div>
+      <div id="admin-preview" class="hidden">
+        <div class="lb-row" style="align-items:center">
+          <b id="admin-pv-name"></b>
+          <span class="spacer" style="flex:1"></span>
+          <button class="act" data-act="admin-pv-approve">✅ 通过并上线</button>
+          <button class="act danger" data-act="admin-pv-reject">❌ 拒绝</button>
+          <button class="act" data-act="admin-pv-delete">🗑 删除</button>
+          <button class="act" data-act="admin-pv-back">返回列表</button>
+        </div>
+        <div id="admin-pv-info" class="hint" style="margin:6px 0"></div>
+        <div class="hint">地图已经套用到背景世界里，你可以直接看。审完点「返回列表」恢复官方地图。</div>
       </div>
     </div>
   </div>
@@ -299,6 +369,13 @@ kbd{background:#2c271e;border:1px solid #55492c;border-radius:2px;padding:0 4px;
         <div class="lb-row">
           <button class="act" data-act="lb-solo" style="background:#2a3a2a;border-color:#4a7a4a;color:#b8e8b8">🎮 单机游戏</button>
           <span class="hint">不联机，与你一个人的世界</span>
+        </div>
+        <div class="sep"></div>
+        <div class="lb-row">
+          <button class="act" data-act="map-hall" style="background:#2a2440;border-color:#6a5a9a;color:#d0b0ff">🗺 地图大厅</button>
+          <button class="act" data-act="open-editor" style="background:#2a2440;border-color:#6a5a9a;color:#d0b0ff">🛠 地图编辑器</button>
+          <button class="act" data-act="open-admin" style="opacity:.55;font-size:12px" title="审核玩家提交的地图（需要管理员口令）">⚙ 管理</button>
+          <span id="map-badge" class="hint" style="margin-left:4px"></span>
         </div>
         <div id="lb-msg"></div>
       </div>

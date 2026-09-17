@@ -38,9 +38,13 @@ jobs:
           node tools/test-newcountry-label.mjs
           node tools/test-puppet-unit.mjs
           node tools/test-occupy-return.mjs
+          node tools/test-scenario-unit.mjs
+          node tools/test-editor-unit.mjs
+          node tools/test-maphall-unit.mjs
 
       - name: 协议端到端（本地起服务 + 两个客户端）
         run: |
           node tools/test-mp.mjs
           node tools/test-puppet-mp.mjs
           node tools/test-ally-mp.mjs
+          node tools/test-maps-api.mjs

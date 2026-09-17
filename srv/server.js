@@ -79,6 +79,9 @@ class Room {
     this.forceFullArmy = false;
     this.chat = [];
     this.finished = false;
+    /* 自定义地图：mapId 指向地图仓库；mapPack 是给客户端对齐世界用的整包 */
+    this.mapId = 0;
+    this.mapPack = null;          // {id,name,author,hash,scenario}
     this.immBroadcast = false;   // 玩家下指令后立刻推一帧，点击手感不用等下一个周期
     this.forceArmy = null;       // 这些军队下一帧必须重发（配合客户端的乐观显示）；用到才建
     this.sentOffers = {};        // 我（各人类玩家）已递交、等待对方回应的和约提案
@@ -134,6 +137,9 @@ class Room {
       t: 'lobby', room: this.code, you, hostKey: this.hostKey,
       host: you === this.hostKey, started: this.started,
       players: [...this.players.values()].map(p => ({ k: p.key, name: p.name, country: p.country })),
+      /* 房间用的哪张地图。客户端本地世界必须先对齐这张图，
+         否则大厅里的国家列表、选国都会被拒绝（编号对不上）。 */
+      map: this.mapPack,
     };
   }
   broadcastLobby() { this.forEachSocket((ws, p) => { try { ws.send(JSON.stringify(this.lobbyPayload(p.key))); } catch (e) {} }); }
@@ -149,8 +155,15 @@ class Room {
 
     this.core = newCore();
     const core = this.core;
-    core.resetWorld();
-    core.buildWorld();
+    if (this.mapPack && this.mapPack.scenario) {
+      /* 自定义地图：客户端与服务端跑的是同一条建图路径
+         resetWorld → setSeed → buildWorld → applyScenario，结果逐省一致 */
+      const err = core.buildWorldFromScenario(this.mapPack.scenario);
+      if (err) throw new Error('这张地图无法载入：' + err);
+    } else {
+      core.resetWorld();
+      core.buildWorld();
+    }
     core.UI.log = (text, cls, forCid) => {
       this.pendingLogs.push({ t: text, cls: cls || '', d: core.fmtDate(), f: forCid | 0 });
       if (this.pendingLogs.length > 400) this.pendingLogs.shift();
@@ -174,6 +187,8 @@ class Room {
         paused: this.paused, speed: this.speed,
         snapshot: core.makeSaveData(),
         offers: this.offersPayload(),
+        /* 重连的玩家可能整页刷新过，本地没有这张地图 —— 随 begin 再带一份 */
+        map: this.mapPack,
       });
     }
     this.broadcastLobby();
@@ -935,6 +950,130 @@ function serveStatic(req, res) {
   });
 }
 
+/* =====================================================================
+   地图工坊 HTTP API
+   ---------------------------------------------------------------------
+   同一端口下同时提供两种入口，所以 /api/... 与 /gs/api/... 都接受。
+   约定：所有响应都是 JSON；出错给 {ok:false, err:"人话"}，不抛 5xx。
+   ===================================================================== */
+const { createMapStore } = require('./maps');
+const mapCore = newCore();                 // 只为校验/哈希用，不参与模拟
+const mapStore = createMapStore(mapCore, { log: (m) => console.log(m) });
+
+function jsonRes(res, code, obj) {
+  const body = JSON.stringify(obj);
+  res.writeHead(code, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+  });
+  res.end(body);
+}
+function readBody(req, max) {
+  return new Promise((resolve) => {
+    let n = 0; const chunks = []; let over = false;
+    req.on('data', (c) => {
+      if (over) return;                       // 超限后继续排空，不再累积（destroy 会让 413 发不出去）
+      n += c.length;
+      if (n > max) { over = true; chunks.length = 0; resolve({ err: '请求体过大' }); return; }
+      chunks.push(c);
+    });
+    req.on('end', () => {
+      if (over) return;
+      try { resolve({ text: Buffer.concat(chunks).toString('utf8') }); }
+      catch (e) { resolve({ err: '读取请求体失败' }); }
+    });
+    req.on('error', () => { if (!over) resolve({ err: '连接中断' }); });
+  });
+}
+function clientIp(req) {
+  const fwd = req.headers['x-forwarded-for'];
+  if (fwd) return String(fwd).split(',')[0].trim();
+  return (req.socket && req.socket.remoteAddress) || '';
+}
+
+/* 返回 true 表示这个请求已经被 API 处理掉了 */
+async function handleApi(req, res) {
+  let p = (req.url || '').split('?')[0];
+  if (!p.startsWith('/api/') && !p.startsWith(BASE + '/api/')) return false;
+  if (p.startsWith(BASE + '/api/')) p = p.slice(BASE.length);
+  const q = Object.fromEntries(new URLSearchParams((req.url || '').split('?')[1] || ''));
+  const method = req.method || 'GET';
+  const ip = clientIp(req);
+
+  try {
+    /* ---- 公开：地图大厅 ---- */
+    if (p === '/api/maps' && method === 'GET') {
+      return jsonRes(res, 200, { ok: true, maps: mapStore.listApproved(), stats: mapStore.stats() }), true;
+    }
+    const mGet = p.match(/^\/api\/maps\/([A-Za-z0-9_-]{1,32})$/);
+    if (mGet && method === 'GET') {
+      const got = mapStore.getApproved(mGet[1]);
+      if (!got) return jsonRes(res, 404, { ok: false, err: '地图不存在或尚未通过审核' }), true;
+      return jsonRes(res, 200, { ok: true, meta: got.meta, scenario: got.scenario }), true;
+    }
+    const mPlay = p.match(/^\/api\/maps\/([A-Za-z0-9_-]{1,32})\/play$/);
+    if (mPlay && method === 'POST') {
+      const ok = mapStore.bumpPlays(mPlay[1]);
+      return jsonRes(res, ok ? 200 : 404, { ok }), true;
+    }
+
+    /* ---- 公开：提交地图 ---- */
+    if (p === '/api/maps' && method === 'POST') {
+      const b = await readBody(req, mapStore.MAX_BODY + 65536);
+      if (b.err) return jsonRes(res, 413, { ok: false, err: b.err }), true;
+      let body;
+      try { body = JSON.parse(b.text); }
+      catch (e) { return jsonRes(res, 400, { ok: false, err: '不是合法的 JSON' }), true; }
+      const r = mapStore.submit(body && body.meta, body && body.scenario, ip);
+      return jsonRes(res, r.ok ? 200 : 400, r), true;
+    }
+
+    /* ---- 管理端 ---- */
+    if (p === '/api/admin/login' && method === 'POST') {
+      const b = await readBody(req, 8192);
+      let body = {};
+      try { body = JSON.parse(b.text || '{}'); } catch (e) { /* 当作空 */ }
+      return jsonRes(res, 200, mapStore.login(ip, body.password)), true;
+    }
+    if (p.startsWith('/api/admin/')) {
+      const tok = req.headers['x-admin-token'] || q.token || '';
+      if (!mapStore.checkToken(tok)) return jsonRes(res, 401, { ok: false, err: '未登录或登录已过期' }), true;
+
+      if (p === '/api/admin/maps' && method === 'GET') {
+        const which = q.status || 'pending';
+        const maps = which === 'pending' ? mapStore.listPending()
+                   : which === 'approved' ? mapStore.listApproved() : mapStore.listPending();
+        return jsonRes(res, 200, { ok: true, status: which, maps, stats: mapStore.stats() }), true;
+      }
+      const aGet = p.match(/^\/api\/admin\/maps\/([A-Za-z0-9_-]{1,32})$/);
+      if (aGet && method === 'GET') {
+        const got = mapStore.getAny(aGet[1]);
+        if (!got) return jsonRes(res, 404, { ok: false, err: '找不到这张地图' }), true;
+        return jsonRes(res, 200, { ok: true, ...got }), true;
+      }
+      if (p === '/api/admin/review' && method === 'POST') {
+        const b = await readBody(req, 8192);
+        let body = {};
+        try { body = JSON.parse(b.text || '{}'); } catch (e) { /* 当作空 */ }
+        return jsonRes(res, 200, mapStore.review(String(body.id || ''), String(body.action || ''), body.note)), true;
+      }
+      if (p === '/api/admin/delete' && method === 'POST') {
+        const b = await readBody(req, 8192);
+        let body = {};
+        try { body = JSON.parse(b.text || '{}'); } catch (e) { /* 当作空 */ }
+        return jsonRes(res, 200, mapStore.remove(String(body.id || ''))), true;
+      }
+      return jsonRes(res, 404, { ok: false, err: '未知的管理接口' }), true;
+    }
+
+    return jsonRes(res, 404, { ok: false, err: '未知接口' }), true;
+  } catch (e) {
+    console.error('[api]', e);
+    return jsonRes(res, 500, { ok: false, err: '服务器内部错误' }), true;
+  }
+}
+
 const server = http.createServer((req, res) => {
   const p = (req.url || '').split('?')[0];
   if (p === '/healthz' || p === BASE + '/healthz') {
@@ -958,8 +1097,10 @@ const server = http.createServer((req, res) => {
         max: Math.round(loopDelay.max / 1e5) / 10,
       },
       heapMB: Math.round(process.memoryUsage().heapUsed / 1048576),
+      maps: mapStore.stats(),
     }) + '\n');
   }
+  if (p.startsWith('/api/') || p.startsWith(BASE + '/api/')) { handleApi(req, res); return; }
   serveStatic(req, res);
 });
 
@@ -1014,11 +1155,19 @@ wss.on('connection', (ws) => {
           const code = makeCode();
           if (!code) throw new Error('无法分配房间号');
           const room = new Room(code);
+          /* 房主可以指定用地图大厅里的哪张图；只接受已审核通过的 */
+          if (m.mapId) {
+            const got = mapStore.getApproved(String(m.mapId));
+            if (!got) throw new Error('这张地图不存在或尚未通过审核');
+            room.mapId = got.meta.id;
+            room.mapPack = { id: got.meta.id, name: got.meta.name, author: got.meta.author,
+                             hash: got.meta.hash, scenario: got.scenario };
+          }
           rooms.set(code, room);
           const p = room.addPlayer(m.name, ws, false);
           ws.roomCode = code; ws.playerKey = p.key;
           ws.send(JSON.stringify(room.lobbyPayload(p.key)));
-          console.log(`[room ${code}] created by ${p.name} (rooms=${rooms.size})`);
+          console.log(`[room ${code}] created by ${p.name}${room.mapId ? ' on map ' + room.mapId : ''} (rooms=${rooms.size})`);
           break;
         }
         case 'join': {
@@ -1035,6 +1184,7 @@ wss.on('connection', (ws) => {
               humans: [...core.humans()],
               paused: room.paused, speed: room.speed,
               snapshot: core.makeSaveData(), offers: room.offersPayload(),
+              map: room.mapPack,
             }));
             room.forceFullArmy = true;
           }

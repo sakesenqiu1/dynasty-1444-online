@@ -1685,6 +1685,248 @@ function setCountryColor(cid, rgb){
 
 /* ---------- 供服务端 / 客户端共用的世界初始化与控制接口 ---------- */
 function setSeed(s){ _seed=s>>>0 || 987654321; }
+
+/* =====================================================================
+   剧本（Scenario）—— 地图工坊的数据模型
+   ---------------------------------------------------------------------
+   世界几何仍然由 WORLD_DATA + 种子确定性生成：客户端与服务端各自 buildWorld()
+   一次，得到逐省逐像素一致的 2007 省 / 177 国，所以"地图"本身依然零传输。
+
+   剧本只记录"相对默认世界改了哪些东西"，是一份**稀疏覆盖表**（通常几 KB）：
+     countries[i] = {n:国名, c:"r,g,b", cap:首都pid, dead:1, ov:宗主, sj:国体,
+                     al:[盟友], g:起始金, new:1(玩家新建的国家)}
+     provinces[i] = {o:归属, t:税, p:产, m:兵, n:省名}
+     armies[]     = {o:归属, p:所在省, s:兵力, n:1海军}
+
+   两边统一走：resetWorld() → setSeed(seed) → buildWorld() → applyScenario(s)
+   于是得到完全相同的世界，再把服务端的动态快照套上去即可。
+   ===================================================================== */
+const SCENARIO_VERSION=1;
+const SCENARIO_BASE='ne110m';        // 底图标识（Natural Earth 110m）
+const SCENARIO_SEED=987654321;
+const MAP_NAME_MAX=24, MAP_AUTHOR_MAX=16, MAP_DESC_MAX=160;
+/* 自定义地图最多能用到多大的国家编号（基础世界 177 国，留足余量）。
+   超出这个范围的引用一律忽略，而不是让整张地图报废。 */
+const MAX_MAP_COUNTRIES=512;
+
+/* 地图元信息与省名都要展示，做一层清洗（去控制字符/尖括号，限长） */
+function sanitizeMapText(raw,max){
+  return String(raw==null?'':raw).replace(/[\u0000-\u001f<>]/g,'').trim().slice(0,max||MAP_NAME_MAX);
+}
+
+/* 编辑器的"默认世界"基线：必须在 buildWorld() 之后、任何编辑动作之前采集，
+   导出时拿它做差集，只存真正改过的省/国。 */
+let _scenBase=null;
+/* 本次建图用的种子。注意不能用 _seed —— rnd() 会一路推进它，
+   buildWorld() 结束时 _seed 早已不是建图时那个值了。 */
+let _worldSeed=SCENARIO_SEED;
+function captureScenarioBase(){
+  _scenBase={
+    prov:provinces.map(p=>p?[p.owner,p.tax,p.prod,p.man,p.name]:null),
+    ctry:countries.map(c=>c?[c.name,c.color.join(','),c.capital,c.alive?1:0,
+                             Math.round(c.gold*10)/10, c.overlord||0, c.subject||0,
+                             (c.allies||[]).join('/')]:null),
+  };
+  return true;
+}
+function scenarioBaseReady(){ return !!_scenBase; }
+
+/* 把当前世界导出成剧本（相对 _scenBase 的差异） */
+function makeScenario(meta){
+  if(!_scenBase) captureScenarioBase();
+  const m=meta||{};
+  const s={v:SCENARIO_VERSION, base:SCENARIO_BASE, seed:_worldSeed,
+    name:sanitizeMapText(m.name,MAP_NAME_MAX)||'未命名地图',
+    author:sanitizeMapText(m.author,MAP_AUTHOR_MAX),
+    desc:sanitizeMapText(m.desc,MAP_DESC_MAX),
+    countries:{}, provinces:{}, armies:[]};
+  const bp=_scenBase.prov, bc=_scenBase.ctry;
+  /* 注意：这张表要被编辑器每次刷新都调一遍，所以"没有改动"的省/国
+     必须零分配地跳过 —— 不能无脑 new 一个对象再丢掉。 */
+  for(let i=1;i<provinces.length;i++){
+    const p=provinces[i]; if(!p||!p.pix.length) continue;
+    const b=bp[i];
+    let o=null;
+    if(!b){ o={o:p.owner}; }
+    else {
+      if(p.owner!==b[0]){ o={o:p.owner}; }
+      if(p.tax!==b[1]){ if(!o)o={}; o.t=p.tax; }
+      if(p.prod!==b[2]){ if(!o)o={}; o.p=p.prod; }
+      if(p.man!==b[3]){ if(!o)o={}; o.m=p.man; }
+      if(p.name!==b[4]){ if(!o)o={}; o.n=p.name; }
+    }
+    if(o) s.provinces[i]=o;
+  }
+  for(let i=1;i<countries.length;i++){
+    const c=countries[i]; if(!c) continue;
+    const b=bc[i];
+    let o=null;
+    if(!b){                                  // 玩家新建的国家（世界生成时不存在）
+      o={new:1, n:c.name, c:c.color.join(','), cap:c.capital};
+    } else {
+      if(c.name!==b[0]){ o={n:c.name}; }
+      if(c.color.join(',')!==b[1]){ if(!o)o={}; o.c=c.color.join(','); }
+      if(c.capital!==b[2]){ if(!o)o={}; o.cap=c.capital; }
+      if((c.alive?1:0)!==b[3]){ if(!o)o={}; o.dead=c.alive?0:1; }
+    }
+    const g=Math.round(c.gold*10)/10;
+    if(!b||g!==b[4]){ if(!o)o={}; o.g=g; }
+    const ov=c.overlord||0;
+    if(!b||ov!==b[5]){ if(!o)o={}; o.ov=ov; }
+    const sj=ov?(c.subject||0):0;
+    if(!b||sj!==b[6]){ if(!o)o={}; o.sj=sj; }
+    const al=(c.allies||[]).join('/');
+    if(!b||al!==b[7]){ if(!o)o={}; o.al=(c.allies||[]).slice(0,24); }
+    if(o) s.countries[i]=o;
+  }
+  for(const a of armies){
+    s.armies.push({o:a.owner,p:a.prov,s:Math.round(a.str),n:a.isNavy?1:0});
+  }
+  return s;
+}
+
+/* 剧本内容哈希：联机时用来校验"你我用的是不是同一版地图"。
+   先按键排序再拼串，保证同样的内容永远得到同样的哈希。 */
+function scenarioHash(s){
+  const parts=[];
+  const ck=Object.keys(s.countries||{}).map(Number).sort((a,b)=>a-b);
+  for(const i of ck){ const o=s.countries[i]; parts.push('c'+i+':'+[o.n,o.c,o.cap,o.dead,o.ov,o.sj,(o.al||[]).join('/'),o.g,o.new].join(',')); }
+  const pk=Object.keys(s.provinces||{}).map(Number).sort((a,b)=>a-b);
+  for(const i of pk){ const o=s.provinces[i]; parts.push('p'+i+':'+[o.o,o.t,o.p,o.m,o.n].join(',')); }
+  for(const a of (s.armies||[])) parts.push('a'+a.o+':'+a.p+','+a.s+','+a.n);
+  parts.push('v'+s.v,'b'+s.base,'s'+(s.seed>>>0));
+  const str=parts.join('|');
+  let h=2166136261>>>0;
+  for(let i=0;i<str.length;i++){ h^=str.charCodeAt(i); h=Math.imul(h,16777619)>>>0; }
+  return h.toString(16).padStart(8,'0');
+}
+
+/* 剧本合法性粗检（服务端收到提交时用；详细校验在服务端做） */
+function validateScenario(s){
+  if(!s||typeof s!=='object') return '不是合法的地图文件';
+  if(s.v!==SCENARIO_VERSION) return `地图版本不符（需要 v${SCENARIO_VERSION}，收到 v${s.v}）`;
+  if(s.base&&s.base!==SCENARIO_BASE) return `底图不符（需要 ${SCENARIO_BASE}）`;
+  if(s.countries&&(typeof s.countries!=='object'||Array.isArray(s.countries))) return 'countries 字段非法';
+  if(s.provinces&&(typeof s.provinces!=='object'||Array.isArray(s.provinces))) return 'provinces 字段非法';
+  if(s.armies&&!Array.isArray(s.armies)) return 'armies 字段非法';
+  return null;
+}
+
+/* 把剧本套用到"刚 buildWorld() 出来的全新世界"上。
+   调用方必须先 resetWorld() → setSeed(seed) → buildWorld()。 */
+function applyScenario(s){
+  const bad=validateScenario(s);
+  if(bad) return bad;
+  /* ---- 先把国家表的规模定下来 ----
+     省份的归属可能指向"世界生成时不存在的国家"（剧本里新建的），
+     所以必须先扩展数组、并把"哪些 id 最终会存在"算出来，
+     否则 provinces 那一轮的越界检查会把新国家挡掉。 */
+  const ct=s.countries||{};
+  const existing=new Set();
+  for(let i=1;i<countries.length;i++) if(countries[i]) existing.add(i);
+  const named=new Set(existing);                 // 可引用的国家 = 原有国家 ∪ 剧本新建的
+  let maxId=countries.length-1;
+  for(const k in ct){
+    const i=+k; if(!i||i<0||i>MAX_MAP_COUNTRIES) continue;   // 超范围的编号直接忽略
+    if(i>maxId) maxId=i;
+    if(existing.has(i)||(ct[k]&&ct[k].n)) named.add(i);
+  }
+  const pv=s.provinces||{};
+  for(const k in pv){
+    const ow=+((pv[k]||{}).o);
+    if(ow>0&&ow<=MAX_MAP_COUNTRIES){ if(ow>maxId) maxId=ow; if(named.has(ow)||countries[ow]) named.add(ow); }
+  }
+  while(countries.length<=maxId) countries.push(null);
+
+  /* ---- 省份覆盖 ---- */
+  for(const k in pv){
+    const i=+k, p=provinces[i];
+    if(!p||!p.pix.length) continue;
+    const o=pv[k];
+    // 归属只接受"确实会存在的国家"，避免省被挂到空位上变成无主地
+    if(o.o!=null){ const ow=+o.o; if(ow>0&&named.has(ow)) p.owner=ow; }
+    if(o.t!=null) p.tax=Math.max(1,Math.min(99,+o.t|0));
+    if(o.p!=null) p.prod=Math.max(1,Math.min(99,+o.p|0));
+    if(o.m!=null) p.man=Math.max(1,Math.min(99,+o.m|0));
+    if(o.n) p.name=sanitizeCountryName(o.n);
+    p.controller=p.owner; p.siege=0;
+  }
+
+  /* ---- 国家覆盖（含新建） ---- */
+  for(const k in ct){
+    const i=+k; if(!i) continue;
+    let c=countries[i];
+    const o=ct[k];
+    if(!c){
+      // 世界生成时不存在 → 剧本里带描述，按描述补建
+      if(!o.n) continue;
+      c={id:i, featId:'CUSTOM', name:sanitizeCountryName(o.n), enName:sanitizeCountryName(o.n),
+         color:[180,180,180], capital:0, provList:[], alive:false, gold:0, mp:0, mpCap:0,
+         forceLimit:0, overlord:0, subject:0, allies:[], ruler:'', lx:0, ly:0};
+      countries[i]=c;
+    }
+    if(o.n){ const nm=sanitizeCountryName(o.n); if(nm){ c.name=nm; c.enName=nm; } }
+    if(o.c){
+      const rgb=String(o.c).split(',').map(Number);
+      if(rgb.length>=3&&rgb.every(v=>isFinite(v))) c.color=rgb.slice(0,3).map(v=>Math.max(0,Math.min(255,Math.round(v))));
+    }
+    if(o.cap!=null){ const cp=+o.cap|0; if(cp>0&&cp<provinces.length) c.capital=cp; }
+    // 宗主必须是"确实存在且不是自己"的国家
+    const ov=+o.ov||0;
+    c.overlord=(ov>0&&ov!==i&&named.has(ov))?ov:0;
+    c.subject=c.overlord?(+o.sj||SUBJ_VASSAL):0;
+    c.allies=Array.isArray(o.al)?o.al.map(Number).filter(x=>x>0&&x!==i&&named.has(x)):[];
+    if(o.g!=null) c.gold=Math.max(0,Math.min(1e6,+o.g||0));
+  }
+  /* ---- 重建归属表 / 首都 / 存活 ---- */
+  for(let i=1;i<countries.length;i++) if(countries[i]) countries[i].provList=[];
+  for(let i=1;i<provinces.length;i++){
+    const p=provinces[i];
+    if(p.pix.length&&countries[p.owner]) countries[p.owner].provList.push(i);
+  }
+  for(let i=1;i<countries.length;i++){
+    const c=countries[i]; if(!c) continue;
+    // 有地就活着，除非剧本显式标了 dead；没地就是亡国
+    if(c.provList.length===0) c.alive=false;
+    else c.alive=!(ct[i]&&ct[i].dead);
+    recomputeCap(c);
+  }
+  // 盟友必须双向且双方都存在
+  for(let i=1;i<countries.length;i++){
+    const c=countries[i]; if(!c) continue;
+    c.allies=c.allies.filter(x=>x!==i&&x<countries.length&&countries[x]&&countries[x].alive);
+  }
+  for(let i=1;i<countries.length;i++){
+    const c=countries[i]; if(!c) continue;
+    for(const x of c.allies) if(countries[x]&&!countries[x].allies.includes(i)) countries[x].allies.push(i);
+  }
+  /* ---- 起始军队 ---- */
+  armies=[]; nextArmy=1;
+  for(const a of (s.armies||[])){
+    const o=+a.o|0, pid=+a.p|0;
+    if(!countries[o]||!countries[o].alive) continue;
+    if(!provinces[pid]||!provinces[pid].pix.length) continue;
+    armies.push({id:nextArmy++, owner:o, prov:pid, str:Math.max(100,Math.min(1e6,+a.s||1000)),
+                 path:[], prog:0, isNavy:a.n?1:0});
+  }
+  recruits=[]; nextRecruit=1;
+  wars=[]; truces={};
+  invalidateCamps();
+  labelsDirty=true;
+  _scenBase=null;     // 世界已不是"默认世界"，基线作废
+  return null;
+}
+
+/* 一步到位：从剧本建出世界（客户端与服务端共用同一条路径） */
+function buildWorldFromScenario(s){
+  resetWorld();
+  setSeed((s&&s.seed)||SCENARIO_SEED);
+  buildWorld();
+  const err=applyScenario(s);
+  if(err) return err;
+  return null;
+}
+
 function resetWorld(){
   _seed=987654321;
   land=null; provOf=null;
@@ -1703,6 +1945,7 @@ function resetWorld(){
 }
 /* 构建世界（客户端与服务端必须调用同一路径，保证省界完全一致） */
 function buildWorld(){
+  _worldSeed=_seed>>>0;        // 记下本次建图用的种子（rnd() 之后会把 _seed 推走）
   const feats=decodeTopo(WORLD_DATA);
   const {cidMap}=buildLand(feats);
   buildProvinces(cidMap,feats);
@@ -1807,6 +2050,9 @@ function checkDeath(cid){
 if(typeof module!=='undefined'&&module.exports){
   module.exports={
     UI,isHuman,setHumans,setSeed,resetWorld,buildWorld,getState,invalidateCamps,
+    SCENARIO_VERSION,SCENARIO_BASE,SCENARIO_SEED,MAP_NAME_MAX,MAP_AUTHOR_MAX,MAP_DESC_MAX,
+    sanitizeMapText,captureScenarioBase,scenarioBaseReady,makeScenario,scenarioHash,
+    validateScenario,applyScenario,buildWorldFromScenario,
     addRecruit,pendingStrength,tickRecruits,RECRUIT_DAYS,NAVY_DAYS,foundVassal,
     makeSaveData,applySaveData,pushLog,pushLogTo,pushLogWorld,fmtDate,
     decodeTopo,buildLand,buildProvinces,buildCountries,rebuildLabels,recomputeCap,totalDev,devOf,

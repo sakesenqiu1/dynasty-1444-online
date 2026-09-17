@@ -98,8 +98,9 @@ function mpName() {
 function mpCreate() {
   const name = mpName();
   MP.name = name; MP.reconnect = false;
-  lbMsg('正在创建房间……');
-  mpConnect(() => mpSend({ t: 'create', name }));
+  const mapId = (typeof currentMap !== 'undefined' && currentMap) ? currentMap.id : 0;
+  lbMsg(mapId ? '正在创建房间（地图：' + currentMap.name + '）……' : '正在创建房间……');
+  mpConnect(() => mpSend({ t: 'create', name, mapId }));
 }
 function mpJoin() {
   const code = ($id('lb-code').value || '').trim();
@@ -158,11 +159,37 @@ function mpHandle(m) {
   }
 }
 
+/* ---------------- 自定义地图：本地世界对齐 ----------------
+   房间可能用的是一张自定义剧本，而客户端本地世界是按官方地图建的。
+   国家编号、省份归属都会对不上，所以进房/开局前必须先把本地世界
+   重建成和服务端一模一样的那一张。
+   返回 true 表示世界被重建过（调用方需要重画地图与标签）。 */
+function mpSyncMap(pack) {
+  const wantHash = (pack && pack.scenario) ? String(pack.hash || '') : '';
+  if ((MP.mapHash || '') === wantHash) return false;
+  if (!pack || !pack.scenario) {
+    resetWorld(); setSeed(SCENARIO_SEED); buildWorld();
+    MP.mapHash = ''; MP.mapName = '';
+  } else {
+    const err = buildWorldFromScenario(pack.scenario);
+    if (err) { mpToast('地图载入失败：' + err); return false; }
+    MP.mapHash = wantHash; MP.mapName = pack.name || '';
+  }
+  labelsDirty = true;
+  return true;
+}
+
 function mpRenderLobby(m) {
   MP.joined = true; MP.room = m.room; MP.host = !!m.host;
   MP.playerKey = m.you; MP.players = m.players || [];
   MP.taken = {};
   for (const p of MP.players) if (p.country) MP.taken[p.country] = p.name;
+
+  // 先把本地世界对齐到房间用的那张地图，否则下面的国家列表全是错的
+  if (mpSyncMap(m.map)) {
+    recolorAll(); rebuildLabels();
+    if (typeof updateMapBadge === 'function') updateMapBadge();
+  }
 
   try { sessionStorage.setItem('gs_session', JSON.stringify({ room: m.room, name: MP.name })); } catch (e) {}
 
@@ -232,6 +259,9 @@ function mpBegin(m) {
   MP.myId = m.you;
   player = m.you;
   setHumans(m.humans || []);
+
+  // 重连场景：整页刷新过，本地还是官方地图，必须按 begin 带来的地图包重建
+  mpSyncMap(m.map);
 
   applySnapshot(m.snapshot);
   $id('lobby').classList.add('hidden');
