@@ -289,8 +289,10 @@ const REL_COL={
   war:    [198,74,62],
   truce:  [204,156,74],
   neutral:[106,114,102],
+  wasteland:[96,100,90],   // 无主荒地：可以通行，但不属于任何国家
 };
 function relColorOf(cid){
+  if(!cid) return REL_COL.wasteland;      // 无主荒地
   if(cid===player) return REL_COL.self;
   const ov=overlordOf(cid);
   if(ov===player) return isPuppet(cid)?REL_COL.puppet:REL_COL.vassal;
@@ -319,6 +321,7 @@ function provFill(p){
   }
   // political：被占领省份保持原主颜色，斜条在 recolorProvince 中叠加
   const c=countries[p.owner]||countries[p.controller];
+  if(!c) return [REL_COL.wasteland[0]*p.varF,REL_COL.wasteland[1]*p.varF,REL_COL.wasteland[2]*p.varF];
   return [c.color[0]*p.varF,c.color[1]*p.varF,c.color[2]*p.varF];
 }
 function setPx(idx,r,g,b){ const o=idx*4, d=imgData.data; d[o]=r|0; d[o+1]=g|0; d[o+2]=b|0; d[o+3]=255; }
@@ -928,6 +931,21 @@ function editSnapCountry(cid){
 function editSnapArmies(){
   return {t:'a',o:armies.map(a=>({o:a.owner,p:a.prov,s:a.str,n:a.isNavy?1:0}))};
 }
+/* 整张地图的快照：给「清空所有国家」这种全局操作做一步撤销用。
+   紧凑数组形式，2007 个省大约几百 KB，只占一层撤销栈。 */
+function editSnapWorld(){
+  const prov=[];
+  for(let i=1;i<provinces.length;i++){
+    const p=provinces[i]; if(!p.pix.length) continue;
+    prov.push([i,p.owner,p.tax,p.prod,p.man,p.name]);
+  }
+  const ctry=[];
+  for(let i=1;i<countries.length;i++){
+    const c=countries[i]; if(!c||isVoidCountry(c)) continue;
+    ctry.push([i,c.name,c.color.slice(),c.capital,c.alive?1:0,c.overlord||0,c.subject||0,(c.allies||[]).slice()]);
+  }
+  return {t:'w', prov, ctry, armies:armies.map(a=>({o:a.owner,p:a.prov,s:a.str,n:a.isNavy?1:0}))};
+}
 /* 一次用户操作可能同时改动多个省/国（涂地会同时影响原主、新主、该省），
    撤销必须把它们当成**一步**整体回滚，否则撤一次只回滚其中一个。 */
 function editPushGroup(items){
@@ -944,6 +962,27 @@ function editApplySnap(s){
     armies=s.o.map((a,i)=>({id:i+1,owner:a.o,prov:a.p,str:a.s,path:[],prog:0,isNavy:a.n}));
     nextArmy=armies.length+1;
   }
+  else if(s.t==='cn'){
+    // 撤销"新建国家"：不能置 null（会破坏"数组无空洞"的不变量），换成空壳占位
+    const id=s.id;
+    if(countries[id]) countries[id]=makeVoidCountry(id);
+  }
+  else if(s.t==='w'){
+    for(const r of s.prov){
+      const p=provinces[r[0]]; if(!p) continue;
+      p.owner=r[1]; p.controller=r[1]; p.tax=r[2]; p.prod=r[3]; p.man=r[4]; p.name=r[5]; p.siege=0;
+    }
+    for(let i=1;i<countries.length;i++){ const c=countries[i]; if(!c||isVoidCountry(c)) continue; c.provList=[]; c.alive=false; c.capital=0; c.allies=[]; c.overlord=0; c.subject=0; }
+    for(const r of s.ctry){
+      const id=r[0];
+      let c=countries[id];
+      if(!c||isVoidCountry(c)){ c={id, featId:'CUSTOM', enName:r[1], provList:[], gold:0, mp:0, mpCap:0, forceLimit:0, ruler:'', lx:0, ly:0}; countries[id]=c; }
+      c.name=r[1]; c.enName=r[1]; c.color=r[2].slice(); c.capital=r[3]; c.alive=!!r[4];
+      c.overlord=r[5]; c.subject=r[6]; c.allies=r[7].slice();
+    }
+    armies=s.armies.map((a,i)=>({id:i+1,owner:a.o,prov:a.p,str:a.s,path:[],prog:0,isNavy:a.n}));
+    nextArmy=armies.length+1;
+  }
 }
 function editUndo(){
   const s=editMode.undo.pop();
@@ -958,9 +997,13 @@ function editUndo(){
 /* ---- 编辑动作 ---- */
 function editPaint(pid){
   const p=provinces[pid]; if(!p||!p.pix.length) return;
-  const cid=editMode.brush;
-  if(!countries[cid]) return;
-  if(p.owner===cid){ pushLog(`${p.name} 已经属于 ${countries[cid].name}`); return; }
+  const cid=editMode.brush|0;
+  // 0 = 无主荒地（橡皮），其余必须是真实存在的国家
+  if(cid!==0&&!countries[cid]) return;
+  if(p.owner===cid){
+    if(cid) pushLog(`${p.name} 已经属于 ${countries[cid].name}`);
+    return;
+  }
   editPushGroup([editSnapProv(pid), editSnapCountry(p.owner), editSnapCountry(cid)]);
   p.owner=cid; p.controller=cid; p.siege=0;
   editRebuild(); editRefresh();
@@ -1035,7 +1078,7 @@ function editClearArmies(){
 /* 把当前画笔国家整块吞掉：它所有省份划给画笔（用于"删掉某个国家"） */
 function editAbsorb(cid){
   const c=countries[cid]; if(!c||!c.provList.length) return;
-  const to=editMode.brush;
+  const to=editMode.brush|0;
   if(to===cid) return;
   const items=[editSnapCountry(cid), editSnapCountry(to)];
   for(const pid of [...c.provList]){
@@ -1044,7 +1087,59 @@ function editAbsorb(cid){
   }
   editPushGroup(items);
   editRebuild(); editRefresh();
-  pushLog(`${c.name} 的全部领土已划归 ${countries[to].name}`);
+  pushLog(to?`${c.name} 的全部领土已划归 ${countries[to].name}`:`${c.name} 的全部领土已变为无主荒地`);
+}
+
+/* ---- 新建国家 ----
+   在原版 177 国之外凭空造一个新国家，然后把它设为画笔，涂哪里就归它。
+   编号优先复用数组里的空位（清空过的旧国家留下的），避免国家表无限膨胀。 */
+let _newCountrySeq=0;
+function editNewCountry(name){
+  let nm=sanitizeCountryName(name);
+  if(!nm){
+    const raw=prompt('新国家的国名（最多 12 字）：','新国家');
+    if(raw===null) return 0;
+    nm=sanitizeCountryName(raw);
+    if(!nm){ pushLog('国名不能为空','war'); return 0; }
+  }
+  // 找一个可用的编号：优先填数组里的空壳位，否则接在最后
+  let id=-1;
+  for(let i=1;i<countries.length;i++) if(!countries[i]||isVoidCountry(countries[i])){ id=i; break; }
+  if(id<0) id=countries.length;
+  if(id>MAX_MAP_COUNTRIES){ pushLog(`国家数量已达上限（${MAX_MAP_COUNTRIES}）`,'war'); return 0; }
+  _newCountrySeq++;
+  const hue=(hash32(id*2654435761+_newCountrySeq*97+dayCount)%360)/360;
+  const c={id, featId:'CUSTOM', name:nm, enName:nm,
+           color:hsl(hue,0.58,0.55).map(v=>v|0),
+           capital:0, provList:[], alive:false, gold:120, mp:6000, mpCap:0, forceLimit:0,
+           overlord:0, subject:0, allies:[],
+           ruler:RULERS[ri(RULERS.length)]+ROMAN[ri(10)], lx:0, ly:0};
+  while(countries.length<id) countries.push(makeVoidCountry(countries.length));
+  if(id===countries.length) countries.push(c); else countries[id]=c;
+  editPushGroup([{t:'cn',id}]);
+  editMode.brush=id;
+  editRebuild(); editRefresh();
+  pushLog(`🏳 已新建国家《${nm}》（编号 ${id}）。现在它已经是画笔了 —— 点「🖌 涂地」在空地上画它的疆域，再用右侧面板设首都。`,'gold');
+  return id;
+}
+/* ---- 一键清空所有国家：全部省份变成无主荒地 ---- */
+function editClearAllCountries(){
+  const owned=countries.filter(c=>c&&c.alive).length;
+  if(!owned){ pushLog('地图上已经没有国家了'); return; }
+  if(!confirm(`把地图上的 ${owned} 个国家全部抹掉？\n\n所有省份会变成「无主荒地」（可以通行，但谁都不属于），\n国名/旗色/归属都会丢失。\n\n可以用「↩ 撤销」恢复。`)) return;
+  editPushGroup([editSnapWorld()]);
+  for(let i=1;i<provinces.length;i++){
+    const p=provinces[i]; if(!p.pix.length) continue;
+    p.owner=0; p.controller=0; p.siege=0;
+  }
+  for(let i=1;i<countries.length;i++){
+    const c=countries[i]; if(!c) continue;
+    c.provList=[]; c.alive=false; c.capital=0; c.allies=[]; c.overlord=0; c.subject=0;
+  }
+  armies=[]; nextArmy=1;
+  editMode.brush=0;                     // 画笔切到"无主荒地"
+  editRebuild(); editRefresh();
+  pushLog('🧹 已清空所有国家：全部省份变成无主荒地。现在可以「➕ 新建国家」重新画一张地图了。','gold');
 }
 
 /* ---- 地图交互 ---- */
@@ -1067,18 +1162,24 @@ function updateEditBar(){
   bar.classList.remove('hidden');
   const b=editBrushCountry();
   const tools=EDIT_TOOLS.map(t=>
-    `<button class="act${editMode.tool===t.k?' on':''}" data-act="edit-tool" data-v="${t.k}" title="${t.html||t.tip||''}">${t.label}</button>`).join('');
-  const total=Object.keys(makeScenarioQuiet().provinces).length;
-  const ctotal=Object.keys(makeScenarioQuiet().countries).length;
+    `<button class="act${editMode.tool===t.k?' on':''}" data-act="edit-tool" data-v="${t.k}" title="${t.tip||''}">${t.label}</button>`).join('');
+  const sc=makeScenarioQuiet();
+  const total=Object.keys(sc.provinces).length;
+  const ctotal=Object.keys(sc.countries).length;
+  const brushCol=b?b.color.map(v=>v|0).join(','):REL_COL.wasteland.join(',');
+  const brushName=b?b.name:'无主荒地';
   bar.innerHTML=`
     <b style="color:#ffd890;white-space:nowrap">🗺 地图编辑器</b>
     <button class="act" data-act="edit-info" title="填写地图名称、作者与简介">📝 ${escHtml(editMode.name||'未命名地图')}</button>
     <span class="sep2"></span>
     ${tools}
     <span class="sep2"></span>
+    <button class="act" style="background:#1c3320;border-color:#509060;color:#a8e0b0" data-act="edit-new-country" title="凭空造一个新国家，然后把它设为画笔，涂到哪里就归它">➕ 新建国家</button>
+    <button class="act danger" data-act="edit-clear-countries" title="把所有国家从地图上抹掉，全部省份变成无主荒地，然后可以重新画">🧹 清空所有国家</button>
+    <span class="sep2"></span>
     <span class="hint" style="white-space:nowrap">画笔：</span>
-    <span class="cd" style="display:inline-block;width:12px;height:12px;background:rgb(${b?b.color.map(v=>v|0).join(','):'120,120,120'});border:1px solid #000"></span>
-    <select id="edit-brush" title="选择要涂成哪个国家">${editBrushOptions()}</select>
+    <span class="cd" style="display:inline-block;width:12px;height:12px;background:rgb(${brushCol});border:1px solid #000" title="${escHtml(brushName)}"></span>
+    <select id="edit-brush" title="选择要涂成哪个国家（选「无主荒地」就是橡皮）">${editBrushOptions()}</select>
     <span class="sep2"></span>
     <button class="act" data-act="edit-undo" title="撤销上一步">↩ 撤销</button>
     <button class="act" data-act="edit-clear-armies" title="清空全部起始军队">🧹 清空军队</button>
@@ -1096,12 +1197,17 @@ function makeScenarioQuiet(){
   catch(e){ return {countries:{},provinces:{},armies:[]}; }
 }
 function editBrushOptions(){
-  const list=[...countries].filter(c=>c).sort((a,b)=>{
+  // 0 号是"橡皮"：把省划成无主荒地
+  const opts=[`<option value="0"${editMode.brush===0?' selected':''}>🧹 无主荒地（橡皮）</option>`];
+  const list=[...countries].filter(c=>c&&!isVoidCountry(c)).sort((a,b)=>{
     if(a.alive!==b.alive) return a.alive?-1:1;
     if(a.provList.length!==b.provList.length) return b.provList.length-a.provList.length;
     return a.name.localeCompare(b.name);
   });
-  return list.map(c=>`<option value="${c.id}"${c.id===editMode.brush?' selected':''}>${escHtml(c.name)}（${c.provList.length}省${c.alive?'':',已亡'}）</option>`).join('');
+  for(const c of list){
+    opts.push(`<option value="${c.id}"${c.id===editMode.brush?' selected':''}>${escHtml(c.name||('国家'+c.id))}（${c.provList.length}省${c.alive?'':',已亡'}）</option>`);
+  }
+  return opts.join('');
 }
 
 /* ---- 右侧编辑面板 ---- */
@@ -1132,8 +1238,13 @@ function editPanel(){
   } else {
     h+=`<div class="sep"></div><p class="hint">还没有选中省份。左键点地图上任一省份开始编辑。</p>`;
   }
-  /* 画笔国家编辑 */
+  /* 画笔国家编辑（画笔 = 无主荒地时给个提示） */
   const b=editBrushCountry();
+  if(!b&&editMode.brush===0){
+    h+=`<div class="sep"></div><h3>画笔 · 🧹 无主荒地</h3>
+      <div class="hint">当前画笔是「无主荒地」：用「🖌 涂地」点省份会把它们变回不属于任何国家的荒地（相当于橡皮）。<br>
+      想画一个新国家就点工具栏的「➕ 新建国家」。</div>`;
+  }
   if(b){
     h+=`<div class="sep"></div><h3>画笔国家 · ${escHtml(b.name)}</h3>
       <div class="row"><span>国名</span><input id="edit-cname" type="text" maxlength="12" value="${escHtml(b.name)}" style="flex:1"><button class="act" data-act="edit-cname-set">改名</button></div>
@@ -1146,8 +1257,8 @@ function editPanel(){
         } return sw; })()
       }</div>
       <div class="row"><span>首都</span>${b.capital?escHtml(provinces[b.capital].name):'—'} · 共 ${b.provList.length} 省</div>
-      <div><button class="act danger" data-act="edit-absorb" data-v="${b.id}" title="把该国其余省份全部划给…（慎用）">⚠ 该国并入他国</button></div>
-      <div class="hint">「该国并入他国」会把它的全部领土交给当前选中的另一个国家，用来删掉不想要的国家。</div>`;
+      <div><button class="act danger" data-act="edit-absorb" data-v="${b.id}" title="把该国其余省份全部划给当前画笔（画笔为「无主荒地」时就是把它整国抹成荒地）">⚠ 该国并入${editMode.brush===0?'荒地':'他国'}</button></div>
+      <div class="hint">「该国并入…」会把它的全部领土交给当前画笔国家，用来删掉不想要的国家。</div>`;
   }
   return h;
 }
@@ -1992,6 +2103,8 @@ document.addEventListener('click',e=>{
     case 'edit-tool': editMode.tool=v; updateEditBar(); refreshPanel(); break;
     case 'edit-info': editInfoDialog(); break;
     case 'edit-undo': editUndo(); break;
+    case 'edit-new-country': editNewCountry(''); break;
+    case 'edit-clear-countries': editClearAllCountries(); break;
     case 'edit-download': editDownload(); break;
     case 'edit-submit': editSubmit(); break;
     case 'edit-clear-armies': editClearArmies(); break;

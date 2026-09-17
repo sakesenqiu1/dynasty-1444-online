@@ -964,7 +964,9 @@ function resolveSieges(){
 /* ---------- 月度结算 ---------- */
 let _aiPending=false;    // 本月的 AI 决策推迟到下一帧执行，避免月度结算在一帧里堵住
 function monthlyTick(){
-  for(let c=1;c<countries.length;c++) if(countries[c].alive) economy(countries[c]);
+  // 注意 countries 里可能有空洞：剧本可以在很靠后的编号上新建国家，
+  // 中间没被定义的编号就是 null，取 .alive 会直接崩
+  for(let c=1;c<countries.length;c++){ const cc=countries[c]; if(cc&&cc.alive) economy(cc); }
   /* aiMonthly 是月度结算里最重的一块（约占 3/4）。
      它只是"每月做一次决策"，早一天晚一天没有区别，
      推到一个 tick 之后能把这根尖峰摊成两半，服务端就不容易掉帧。 */
@@ -980,7 +982,7 @@ function monthlyTick(){
   for(const k in truces) if(truces[k]<=dayCount) delete truces[k];
   if(cal.m===0){ // 每年
     for(let c=1;c<countries.length;c++){
-      const cc=countries[c]; if(!cc.alive) continue;
+      const cc=countries[c]; if(!cc||!cc.alive) continue;
       if(rnd()<0.03){ cc.ruler=RULERS[ri(RULERS.length)]+ROMAN[ri(10)]; if(isHuman(c)) pushLog('老王驾崩，'+cc.ruler+' 继承大统','gold',c); }
     }
   }
@@ -1150,7 +1152,7 @@ function aiMonthly(){
   // 各国决策
   for(let c=1;c<countries.length;c++){
     const cc=countries[c];
-    if(!cc.alive||isHuman(c)) continue;
+    if(!cc||!cc.alive||isHuman(c)) continue;
     // 已集结 + 正在征集的兵力一起算，避免 1 年集结期内反复下单
     const myStr=countryStrength(c)+pendingStrength(c);
     // 征兵（陆军 / 海军）：AI 同样要等集结期结束才成军
@@ -1572,6 +1574,8 @@ function foundVassal(overlord, capitalPid, name, extraPids){
 }
 function transferProvince(pid,to){
   const p=provinces[pid]; if(!p.pix.length) return;
+  to=to|0;
+  if(to!==0&&!countries[to]) return;               // 目标国家不存在（0 = 划成无主荒地）
   const old=p.owner;
   if(old===to) return;
   // 记录故土：此省曾被 old 拥有（供 AI 收复失地决策与蚕食优先使用）
@@ -1579,14 +1583,16 @@ function transferProvince(pid,to){
     if(!p.former) p.former=[];
     if(!p.former.includes(old)) p.former.push(old);
   }
-  const oc=countries[old];
-  oc.provList=oc.provList.filter(x=>x!==pid);
-  countries[to].provList.push(pid);
+  /* 无主荒地（owner=0）两端都没有对应的国家对象，别拿它去取 provList */
+  const oc=old>0?countries[old]:null;
+  if(oc) oc.provList=oc.provList.filter(x=>x!==pid);
+  if(to>0) countries[to].provList.push(pid);
   p.owner=to; p.controller=to; p.siege=0;
   UI.recolorNbrs(pid);
-  recomputeCap(oc); recomputeCap(countries[to]);
+  if(oc) recomputeCap(oc);
+  if(to>0) recomputeCap(countries[to]);
   labelsDirty=true;
-  checkDeath(old);
+  if(old>0) checkDeath(old);
 }
 /* ---------- 附庸机制（AI 与玩家共用） ---------- */
 // 隔海相近：两国的海岸像素之间有 ≤12 像素（3°）的纯海路（近海岛屿可册封）
@@ -1759,6 +1765,7 @@ function makeScenario(meta){
   }
   for(let i=1;i<countries.length;i++){
     const c=countries[i]; if(!c) continue;
+    if(isVoidCountry(c)) continue;            // 数组补的空位，不是真国家，别写进剧本
     const b=bc[i];
     let o=null;
     if(!b){                                  // 玩家新建的国家（世界生成时不存在）
@@ -1812,6 +1819,18 @@ function validateScenario(s){
   return null;
 }
 
+/* 数组补位用的"空壳国家"。
+   剧本可以在很靠后的编号上新建国家（比如 177 国的世界直接建 200 号），
+   中间没被定义的编号必须填点东西进去 —— 引擎里有大量
+   `for(c=1;c<countries.length;c++) if(countries[c].alive)` 这样的循环，
+   留 null 会直接崩。空壳是 alive:false 且没有领土，不会出现在任何界面里。 */
+function makeVoidCountry(id){
+  return {id, featId:'VOID', name:'', enName:'', color:[70,70,70],
+          capital:0, provList:[], alive:false, gold:0, mp:0, mpCap:0,
+          forceLimit:0, overlord:0, subject:0, allies:[], ruler:'', lx:0, ly:0};
+}
+function isVoidCountry(c){ return !!c && c.featId==='VOID' && !c.provList.length; }
+
 /* 把剧本套用到"刚 buildWorld() 出来的全新世界"上。
    调用方必须先 resetWorld() → setSeed(seed) → buildWorld()。 */
 function applyScenario(s){
@@ -1837,14 +1856,15 @@ function applyScenario(s){
     if(ow>0&&ow<=MAX_MAP_COUNTRIES){ if(ow>maxId) maxId=ow; if(named.has(ow)||countries[ow]) named.add(ow); }
   }
   while(countries.length<=maxId) countries.push(null);
+  for(let i=1;i<=maxId;i++) if(!countries[i]) countries[i]=makeVoidCountry(i);
 
   /* ---- 省份覆盖 ---- */
   for(const k in pv){
     const i=+k, p=provinces[i];
     if(!p||!p.pix.length) continue;
     const o=pv[k];
-    // 归属只接受"确实会存在的国家"，避免省被挂到空位上变成无主地
-    if(o.o!=null){ const ow=+o.o; if(ow>0&&named.has(ow)) p.owner=ow; }
+    /* 归属只接受"确实会存在的国家"；o:0 是特例 —— 表示无主荒地（可以通行，不属于任何国家） */
+    if(o.o!=null){ const ow=+o.o; if(ow===0||(ow>0&&named.has(ow))) p.owner=ow; }
     if(o.t!=null) p.tax=Math.max(1,Math.min(99,+o.t|0));
     if(o.p!=null) p.prod=Math.max(1,Math.min(99,+o.p|0));
     if(o.m!=null) p.man=Math.max(1,Math.min(99,+o.m|0));
@@ -1857,8 +1877,8 @@ function applyScenario(s){
     const i=+k; if(!i) continue;
     let c=countries[i];
     const o=ct[k];
-    if(!c){
-      // 世界生成时不存在 → 剧本里带描述，按描述补建
+    // 空壳位（数组补位）也按"不存在"处理，剧本给了描述就正式建出来
+    if(!c||isVoidCountry(c)){
       if(!o.n) continue;
       c={id:i, featId:'CUSTOM', name:sanitizeCountryName(o.n), enName:sanitizeCountryName(o.n),
          color:[180,180,180], capital:0, provList:[], alive:false, gold:0, mp:0, mpCap:0,
@@ -2051,6 +2071,7 @@ if(typeof module!=='undefined'&&module.exports){
   module.exports={
     UI,isHuman,setHumans,setSeed,resetWorld,buildWorld,getState,invalidateCamps,
     SCENARIO_VERSION,SCENARIO_BASE,SCENARIO_SEED,MAP_NAME_MAX,MAP_AUTHOR_MAX,MAP_DESC_MAX,
+    MAX_MAP_COUNTRIES,makeVoidCountry,isVoidCountry,
     sanitizeMapText,captureScenarioBase,scenarioBaseReady,makeScenario,scenarioHash,
     validateScenario,applyScenario,buildWorldFromScenario,
     addRecruit,pendingStrength,tickRecruits,RECRUIT_DAYS,NAVY_DAYS,foundVassal,

@@ -382,5 +382,157 @@ check('改的发展度生效', t13.tax === 88, t13);
 check('能正常跑 400 天', t13.day === 400 && t13.armies > 0, t13);
 check('剧本哈希稳定可算', /^[0-9a-f]{8}$/.test(t13.hash), t13.hash);
 
+/* ================= 14. 新建国家 ================= */
+console.log('\n-- 14. 凭空新建国家 --');
+const t14 = run(`
+  openEditor();
+  const n0=countries.length;
+  const alive0=countries.filter(c=>c&&c.alive).length;
+  const id=editNewCountry('测试新国');
+  const c=countries[id];
+  const created={ id, isNew:id>=n0, name:c&&c.name, alive:c&&c.alive, provs:c?c.provList.length:0,
+                  featId:c&&c.featId, colorOk:!!(c&&c.color&&c.color.length===3),
+                  brush:editMode.brush };
+  // 现在它是画笔了，涂几个省
+  const host=countries.find(x=>x&&x.alive&&x.id!==id&&x.provList.length>4);
+  const pids=host.provList.slice(0,3);
+  for(const pid of pids) editPaint(pid);
+  const after={ alive:c.alive, provs:c.provList.length, ownerOk:pids.every(p=>provinces[p].owner===id) };
+  const sc=makeScenario({name:'新国测试'});
+  return { n0, alive0, created, after, pids,
+           scHas:!!sc.countries[id], scNew:sc.countries[id]&&sc.countries[id].new,
+           scName:sc.countries[id]&&sc.countries[id].n,
+           scProvs:pids.map(p=>sc.provinces[p]&&sc.provinces[p].o) };
+`);
+check('新国家的编号接在最后（不挖空数组）', t14.created.isNew === true, t14);
+check('名字与旗色正确', t14.created.name === '测试新国' && t14.created.colorOk === true, t14.created);
+check('刚建出来时没有领土、不存在', t14.created.provs === 0 && t14.created.alive === false, t14.created);
+check('自动成为画笔', t14.created.brush === t14.created.id, t14.created);
+check('涂地后有了领土并立国', t14.after.alive === true && t14.after.provs === 3 && t14.after.ownerOk === true, t14.after);
+check('剧本里以 new:1 记录新国家', t14.scHas === true && t14.scNew === 1 && t14.scName === '测试新国', t14);
+check('剧本里省份归属指向新国家', t14.scProvs.every(o => o === t14.created.id), t14.scProvs);
+
+/* 新建国家能在另一端忠实重建 */
+const t14b = run(`
+  const id=countries.findIndex(c=>c&&c.name==='测试新国');
+  const sc=makeScenario({name:'新国测试'});
+  const err=buildWorldFromScenario(sc);
+  const c=countries[id];
+  return { err, id, exists:!!c, name:c&&c.name, alive:c&&c.alive, provs:c?c.provList.length:0,
+           cap:c&&c.capital, capIsOwn:c&&c.provList.includes(c.capital) };
+`);
+check('【核心】新建的国家能在独立重建后存在', t14b.err === null && t14b.exists === true, t14b);
+check('名字与领土保留', t14b.name === '测试新国' && t14b.alive === true && t14b.provs === 3, t14b);
+check('首都自动落在一块自己的领土上', t14b.capIsOwn === true, t14b);
+
+/* ================= 15. 一键清空所有国家 → 无主荒地 ================= */
+console.log('\n-- 15. 清空所有国家 → 无主荒地 --');
+const t15 = run(`
+  openEditor();
+  const alive0=countries.filter(c=>c&&c.alive).length;
+  const owned0=provinces.filter(p=>p&&p.pix.length&&p.owner>0).length;
+  editClearAllCountries();
+  const alive1=countries.filter(c=>c&&c.alive).length;
+  const unowned1=provinces.filter(p=>p&&p.pix.length&&p.owner===0).length;
+  const total=provinces.filter(p=>p&&p.pix.length).length;
+  const brush=editMode.brush;
+  const sc=makeScenario({name:'荒地'});
+  const wild=Object.values(sc.provinces).filter(o=>o.o===0).length;
+  return { alive0, owned0, alive1, unowned1, total, brush, wild,
+           armyN:armies.length,
+           deadInSc:Object.values(sc.countries).filter(o=>o.dead===1).length };
+`);
+check('清空前有存活国家', t15.alive0 > 100, t15.alive0);
+check('【核心】清空后没有任何存活国家', t15.alive1 === 0, t15.alive1);
+check('【核心】全部省份变成无主（owner=0）', t15.unowned1 === t15.total, { unowned: t15.unowned1, total: t15.total });
+check('军队一并清空', t15.armyN === 0, t15.armyN);
+check('画笔自动切到「无主荒地」', t15.brush === 0, t15.brush);
+check('剧本用 o:0 记录荒地', t15.wild === t15.total, { wild: t15.wild, total: t15.total });
+check('剧本把所有国家标为 dead', t15.deadInSc > 100, t15.deadInSc);
+
+console.log('\n-- 15b. 荒地上的撤销与重建 --');
+const t15b = run(`
+  const sc=makeScenario({name:'荒地'});
+  const err=buildWorldFromScenario(sc);
+  const alive=countries.filter(c=>c&&c.alive).length;
+  const unowned=provinces.filter(p=>p&&p.pix.length&&p.owner===0).length;
+  // 建一个玩家国家在上面玩
+  setHumans([]); player=0; started=true;
+  for(let i=0;i<600;i++) tickDay();
+  return { err, alive, unowned, day:dayCount };
+`);
+check('纯荒地世界能在两端重建', t15b.err === null, t15b.err);
+check('重建后仍是全荒地', t15b.alive === 0 && t15b.unowned > 1900, t15b);
+check('纯荒地世界能正常推进 600 天', t15b.day === 600, t15b);
+
+const t15c = run(`
+  openEditor();
+  const name0=countries.find(c=>c&&c.alive).name;
+  const owned0=provinces.filter(p=>p&&p.pix.length&&p.owner>0).length;
+  editClearAllCountries();
+  editUndo();
+  const name1=countries.find(c=>c&&c.alive).name;
+  const owned1=provinces.filter(p=>p&&p.pix.length&&p.owner>0).length;
+  return { name0, name1, owned0, owned1, brush:editMode.brush };
+`);
+check('【核心】清空可以一步撤销，国家全部回来', t15c.name1 === t15c.name0 && t15c.owned1 === t15c.owned0, t15c);
+
+console.log('\n-- 15d. 荒地 + 新建国家 = 从零画一张地图 --');
+const t15d = run(`
+  openEditor();
+  editClearAllCountries();
+  const A=editNewCountry('甲国');
+  const B=editNewCountry('乙国');
+  // 甲国占 200 个省，乙国占 100 个
+  const land=provinces.map((p,i)=>p&&p.pix.length?i:0).filter(Boolean);
+  editMode.brush=A; for(const pid of land.slice(0,200)) editPaint(pid);
+  editMode.brush=B; for(const pid of land.slice(200,300)) editPaint(pid);
+  const sc=makeScenario({name:'从零画的地图'});
+  const err=buildWorldFromScenario(sc);
+  const alive=countries.filter(c=>c&&c.alive).map(c=>c.name).sort();
+  const unowned=provinces.filter(p=>p&&p.pix.length&&p.owner===0).length;
+  setHumans([A,B]); player=A; started=true;
+  for(let i=0;i<400;i++) tickDay();
+  return { A, B, err, alive, unowned, day:dayCount, armyN:armies.length,
+           aProv:countries[A].provList.length, bProv:countries[B].provList.length,
+           scCountries:Object.keys(sc.countries).length, scProvinces:Object.keys(sc.provinces).length };
+`);
+check('两个新国家都建出来了', t15d.alive.length === 2 && t15d.alive.join(',') === '乙国,甲国', t15d.alive);
+check('领土数正确', t15d.aProv === 200 && t15d.bProv === 100, t15d);
+check('其余仍是荒地', t15d.unowned === 2007 - 300, t15d.unowned);
+check('【核心】从零画的地图能正常跑 400 天', t15d.err === null && t15d.day === 400, t15d);
+check('剧本体积仍然很小', JSON.stringify(run(`return makeScenario({name:'x'});`)).length < 60000,
+  JSON.stringify(run(`return makeScenario({name:'x'});`)).length);
+
+/* ================= 16. 荒地渲染与交互 ================= */
+console.log('\n-- 16. 无主荒地的显示与交互 --');
+const t16 = run(`
+  openEditor();
+  const land=provinces.findIndex(p=>p&&p.pix.length);
+  // 把该省变成荒地后，渲染取色不能崩
+  editMode.brush=0;
+  editPaint(land);
+  let fillOk=true, fill=null;
+  try{ fill=provFill(provinces[land]); }catch(e){ fillOk=false; fill=e.message; }
+  const relOk=(()=>{ const m=mapMode; mapMode='rel'; let r; try{ r=relColorOf(0); }catch(e){ r=null; } mapMode=m; return r; })();
+  // 画家用「吸色」在荒地上点一下：画笔应保持 0
+  editMode.tool='pick'; editMode.brush=0;
+  editMapClick(land);
+  const paintOk=(()=>{ let ok=true; try{ editPaint(land); }catch(e){ ok=false; } return ok; })();
+  // 荒地省份不应该出现在任何国家的 provList 里
+  const inAny=countries.some(c=>c&&c.provList.includes(land));
+  return { land, fillOk, fill, relOk, paintOk, inAny,
+           brushOpts:editBrushOptions().includes('🧹 无主荒地'),
+           barHasNew:document.getElementById('editbar').innerHTML.includes('edit-new-country'),
+           barHasClear:document.getElementById('editbar').innerHTML.includes('edit-clear-countries') };
+`);
+check('荒地省份取色不崩', t16.fillOk === true, t16.fill);
+check('外交模式下荒地有专属颜色', Array.isArray(t16.relOk) && t16.relOk.length === 3, t16.relOk);
+check('在荒地上涂地/吸色都安全', t16.paintOk === true, t16);
+check('荒地不属于任何国家的 provList', t16.inAny === false, t16);
+check('画笔下拉里有「无主荒地（橡皮）」', t16.brushOpts === true, t16);
+check('工具栏有「➕ 新建国家」', t16.barHasNew === true, t16);
+check('工具栏有「🧹 清空所有国家」', t16.barHasClear === true, t16);
+
 console.log(`\n=== 结果：${failures === 0 ? '全部通过 ✅' : failures + ' 项失败 ❌'} ===\n`);
 process.exit(failures ? 1 : 0);
