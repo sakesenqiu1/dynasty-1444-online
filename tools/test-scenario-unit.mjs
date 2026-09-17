@@ -301,5 +301,76 @@ const t7 = A.run(`
 check('剧本 + 存档往返后世界一致', t7.same === true, { same: t7.same, len: t7.len });
 check('剧本改的国名保留', t7.name === '我的王朝', t7.name);
 
+/* ================= 8. 起始战争 / keepBase / 老地图兼容 ================= */
+console.log('\n-- 8. 起始战争、基线保留、老地图兼容 --');
+const t8 = A.run(`
+  resetWorld(); setSeed(SCENARIO_SEED); buildWorld(); captureScenarioBase();
+  const C=countries;
+  const [a,b]=C.filter(c=>c&&c.alive&&c.provList.length>4).slice(0,2).map(c=>c.id);
+  wars=[{a,d:b,aB:0,dB:0,startDay:0,casA:0,casD:0}];
+  const sc=makeScenario({name:'战争'});
+  return { a, b, sc, wars:sc.wars||[], hasWars:!!sc.wars };
+`);
+check('起始战争被写进剧本', t8.hasWars === true && t8.wars.length === 1, t8);
+check('战争以 [小,大] 数对保存', t8.wars[0][0] === Math.min(t8.a, t8.b) && t8.wars[0][1] === Math.max(t8.a, t8.b), t8);
+
+const t8b = B.run(`
+  const err=buildWorldFromScenario(${JSON.stringify(t8.sc)});
+  return { err, wars:wars.map(w=>[w.a,w.d]), atWar:atWar(${t8.a},${t8.b}), camp:campOf(${t8.a}).has(${t8.b}) };
+`);
+check('战争在另一端重建', t8b.err === null && t8b.wars.length === 1, t8b);
+check('【核心】atWar 立刻为真', t8b.atWar === true, t8b);
+check('两国不算同一阵营', t8b.camp === false, t8b);
+
+const t8c = A.run(`
+  // keepBase：导入后还要继续编辑，基线不能被清掉
+  resetWorld(); setSeed(SCENARIO_SEED); buildWorld(); captureScenarioBase();
+  const sc={ v:1, base:'ne110m', seed:SCENARIO_SEED, name:'基线测试',
+             countries:{ '44':{ n:'改名了' } }, provinces:{}, armies:[] };
+  const before=scenarioBaseReady();
+  const err=applyScenario(sc,true);
+  const afterKeep=scenarioBaseReady();
+  const sc2=makeScenario({name:'再导出'});
+  const keptName=(sc2.countries['44']||{}).n;
+  // 不带 keepBase 时基线应作废
+  applyScenario(sc,false);
+  const afterDrop=scenarioBaseReady();
+  return { before, err, afterKeep, afterDrop, keptName };
+`);
+check('采基线后 scenarioBaseReady 为真', t8c.before === true, t8c);
+check('【核心】applyScenario(...,true) 保留基线', t8c.afterKeep === true, t8c);
+check('【核心】保留基线下再导出，改动仍在', t8c.keptName === '改名了', t8c);
+check('applyScenario(...,false) 会作废基线（原行为不变）', t8c.afterDrop === false, t8c);
+
+const t8d = A.run(`
+  // 老地图：完全没有 wars / ov / sj / al 字段
+  const old={ v:1, base:'ne110m', seed:987654321, name:'老图',
+              countries:{ '44':{ n:'老国' } }, provinces:{ '1':{ o:44 } }, armies:[] };
+  const bad=validateScenario(old);
+  const err=buildWorldFromScenario(old);
+  const C=countries;
+  return { bad, err, wars:wars.length, name:C[44].name,
+           ov:C[44].overlord, al:(C[44].allies||[]).length,
+           hasWarsField:'wars' in old };
+`);
+check('老地图通过校验', t8d.bad === null, t8d.bad);
+check('【核心】老地图能正常建出世界（不因缺字段报错）', t8d.err === null, t8d);
+check('老地图没有战争', t8d.wars === 0, t8d.wars);
+check('老地图的国名照常生效', t8d.name === '老国', t8d);
+check('缺外交字段 = 无外交关系', t8d.ov === 0 && t8d.al === 0, t8d);
+
+const t8e = A.run(`
+  // 脏 wars：指向不存在的国家 / 自己打自己 / 重复，都要被忽略
+  const sc={ v:1, base:'ne110m', seed:987654321, name:'脏战争',
+             countries:{}, provinces:{}, armies:[],
+             wars:[[44,44],[44,99999],[0,44],'x',null,[44,46],[46,44]] };
+  const bad=validateScenario(sc);
+  const err=buildWorldFromScenario(sc);
+  return { bad, err, wars:wars.map(w=>[w.a,w.d]).sort((p,q)=>p[0]-q[0]) };
+`);
+check('wars 是数组时通过校验', t8e.bad === null, t8e.bad);
+check('脏战争数据被清理', t8e.err === null && t8e.wars.length <= 1, t8e);
+check('自打自/不存在国家/重复都被丢掉', t8e.wars.every(w => w[0] !== w[1] && w[1] < 200), t8e);
+
 console.log(`\n=== 结果：${failures === 0 ? '全部通过 ✅' : failures + ' 项失败 ❌'} ===\n`);
 process.exit(failures ? 1 : 0);

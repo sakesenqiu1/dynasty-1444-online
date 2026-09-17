@@ -534,5 +534,229 @@ check('画笔下拉里有「无主荒地（橡皮）」', t16.brushOpts === true
 check('工具栏有「➕ 新建国家」', t16.barHasNew === true, t16);
 check('工具栏有「🧹 清空所有国家」', t16.barHasClear === true, t16);
 
+/* ================= 17. 导入 ================= */
+console.log('\n-- 17. 导入本地地图接着改 --');
+const t17 = run(`
+  // 先做一张图并导出
+  openEditor();
+  const land=provinces.map((p,i)=>p&&p.pix.length?i:0).filter(Boolean);
+  editClearAllCountries();
+  const A=editNewCountry('导入甲'), B=editNewCountry('导入乙');
+  editMode.brush=A; for(const pid of land.slice(0,50)) editPaint(pid);
+  editMode.brush=B; for(const pid of land.slice(50,90)) editPaint(pid);
+  editSetOverlord(B,A,SUBJ_PUPPET);
+  editAddAlly(A,B);                       // 附庸不能结盟，应被拒
+  editClearOverlord(B);
+  editAddAlly(A,B);                       // 解除后再结盟，应成功
+  editToggleWar(A,B===0?B:B);             // 同一个国家，应无效
+  // 找一个第三方国家做敌人
+  const third=countries.find(c=>c&&!isVoidCountry(c)&&c.id!==A&&c.id!==B&&c.provList.length>0);
+  if(third){ editMode.brush=A; editToggleWar(A,third.id); }
+  editMode.name='导入测试图'; editMode.author='作者丙'; editMode.desc='说明';
+  const exported=makeScenario({name:'导入测试图',author:'作者丙',desc:'说明'});
+  const digestBefore=(function(){
+    let s=''; for(let i=1;i<provinces.length;i++){ const p=provinces[i]; if(!p.pix.length) continue; s+=i+':'+p.owner+';'; }
+    for(let i=1;i<countries.length;i++){ const c=countries[i]; if(!c||isVoidCountry(c)) continue; s+=i+':'+c.name+','+c.color.join('-')+','+(c.overlord||0)+','+(c.subject||0)+','+(c.allies||[]).join('/')+';'; }
+    s+='W'+wars.map(w=>w.a+'-'+w.d).sort().join(',');
+    return s;
+  })();
+  const aliveBefore=countries.filter(c=>c&&c.alive).length;
+  closeEditor();
+  return { exported, digestBefore, aliveBefore, A, B, third:third?third.id:0,
+           name:exported.name, author:exported.author,
+           exportedWars:(exported.wars||[]).length };
+`);
+check('导出的剧本带上地图信息', t17.name === '导入测试图' && t17.author === '作者丙', t17);
+check('导出带上了起始战争', t17.exportedWars >= 1, t17.exportedWars);
+
+const t17b = run(`
+  // 模拟"关掉页面后重新打开并导入"
+  const ok=importScenarioIntoEditor(${JSON.stringify(t17.exported)},'导入测试图');
+  const digestAfter=(function(){
+    let s=''; for(let i=1;i<provinces.length;i++){ const p=provinces[i]; if(!p.pix.length) continue; s+=i+':'+p.owner+';'; }
+    for(let i=1;i<countries.length;i++){ const c=countries[i]; if(!c||isVoidCountry(c)) continue; s+=i+':'+c.name+','+c.color.join('-')+','+(c.overlord||0)+','+(c.subject||0)+','+(c.allies||[]).join('/')+';'; }
+    s+='W'+wars.map(w=>w.a+'-'+w.d).sort().join(',');
+    return s;
+  })();
+  return { ok, digestAfter, editOn:editMode.on, name:editMode.name, author:editMode.author,
+           alive:countries.filter(c=>c&&c.alive).length,
+           baseReady:scenarioBaseReady(),
+           barHidden:document.getElementById('editbar').innerHTML==='' };
+`);
+check('导入成功并进入编辑器', t17b.ok === true && t17b.editOn === true, t17b);
+check('【核心】导入后的世界与导出前逐省逐国一致', t17b.digestAfter === t17.digestBefore,
+  { same: t17b.digestAfter === t17.digestBefore, a: t17b.digestAfter.length, b: t17.digestBefore.length });
+check('地图信息一并恢复', t17b.name === '导入测试图' && t17b.author === '作者丙', t17b);
+check('【核心】导入后基线仍然可用（能继续编辑）', t17b.baseReady === true, t17b);
+check('导入后编辑器 UI 已就绪', t17b.barHidden === false, t17b);
+
+const t17c = run(`
+  // 导入后继续改，再导出，改动应该叠加而不是丢失
+  // （这张图是从"清空所有国家"起的，2007 个省本来就已经在 diff 里了，
+  //   所以这里验证的是"改动确实落到剧本的对应字段上"）
+  const target=countries.find(c=>c&&c.alive&&c.provList.length>3);
+  const pid=target.provList[0];
+  const newC=countries.find(c=>c&&!isVoidCountry(c)&&c.id!==target.id&&c.provList.length>0);
+  editMode.brush=newC.id;
+  editPaint(pid);
+  const sc=makeScenario({name:'导入测试图'});
+  const painted=(sc.provinces[pid]||{}).o;
+  // 改省名与发展度也要落进去
+  editSetProvName(pid,'导入后改的名');
+  editSetDev(pid,'tax',55);
+  const sc2=makeScenario({name:'导入测试图'});
+  const p2=sc2.provinces[pid]||{};
+  const again=importScenarioIntoEditor(sc2,'x');
+  const restored=provinces[pid];
+  return { pid, painted, want:newC.id, again,
+           name:p2.n, tax:p2.t, restoredName:restored.name, restoredTax:restored.tax,
+           provinces:Object.keys(sc2.provinces).length };
+`);
+check('【核心】导入后涂地生效并写进剧本', t17c.painted === t17c.want, t17c);
+check('【核心】导入后改名/改发展度也写进剧本', t17c.name === '导入后改的名' && t17c.tax === 55, t17c);
+check('二次导出再导入，改动完整保留', t17c.again === true && t17c.restoredName === '导入后改的名' && t17c.restoredTax === 55, t17c);
+
+console.log('\n-- 17d. 导入非法文件 --');
+const t17d = run(`
+  const bad1=importScenarioIntoEditor(null,'x');
+  const bad2=importScenarioIntoEditor({v:99},'x');
+  const bad3=importScenarioIntoEditor({v:1,base:'other'},'x');
+  const okv=importScenarioIntoEditor({v:1,base:'ne110m',seed:987654321,name:'空',countries:{},provinces:{},armies:[]},'x');
+  return { bad1, bad2, bad3, okv, on:editMode.on };
+`);
+check('导入 null 被拒绝', t17d.bad1 === false, t17d);
+check('导入版本不符被拒绝', t17d.bad2 === false, t17d);
+check('导入底图不符被拒绝', t17d.bad3 === false, t17d);
+check('导入合法的最小剧本成功', t17d.okv === true && t17d.on === true, t17d);
+
+/* ================= 18. 外交关系 ================= */
+console.log('\n-- 18. 开局外交关系（宗主/属国、盟友、战争） --');
+const t18 = run(`
+  openEditor();
+  const C=countries;
+  const list=C.filter(c=>c&&c.alive&&c.provList.length>2).slice(0,4);
+  const [a,b,x,y]=list.map(c=>c.id);
+  // 宗主 / 属国
+  editSetOverlord(b,a,SUBJ_VASSAL);
+  editSetOverlord(x,a,SUBJ_PUPPET);
+  // 盟友
+  editAddAlly(a,y);
+  // 战争
+  editToggleWar(a,y);   // 先宣战（与盟友并存是可以的，这一条只验证机制）
+  const mid={ bOv:C[b].overlord, bSj:C[b].subject, xOv:C[x].overlord, xSj:C[x].subject,
+              aAlly:(C[a].allies||[]).includes(y), yAlly:(C[y].allies||[]).includes(a),
+              wars:wars.length };
+  // 附庸不能结盟：给 b 结盟应被拒
+  editAddAlly(b,y);
+  const vassalAllyRefused=!(C[b].allies||[]).includes(y);
+  // 解除臣属后应能结盟
+  editClearOverlord(b);
+  editAddAlly(b,y);
+  const afterClearAlly=(C[b].allies||[]).includes(y);
+  // 解除战争
+  editToggleWar(a,y);
+  const warsAfter=wars.filter(w=>(w.a===a&&w.d===y)||(w.a===y&&w.d===a)).length;
+  const sc=makeScenario({name:'外交测试'});
+  return { a,b,x,y, mid, vassalAllyRefused, afterClearAlly, warsAfter,
+           scB:sc.countries[b]||{}, scX:sc.countries[x]||{}, scA:sc.countries[a]||{},
+           scWars:sc.wars||[] };
+`);
+check('附庸关系建立', t18.mid.bOv === t18.a && t18.mid.bSj === 1, t18.mid);
+check('傀儡关系建立', t18.mid.xOv === t18.a && t18.mid.xSj === 2, t18.mid);
+check('盟友双向建立', t18.mid.aAlly === true && t18.mid.yAlly === true, t18.mid);
+check('战争建立', t18.mid.wars >= 1, t18.mid.wars);
+check('【规则】附庸不能另行结盟', t18.vassalAllyRefused === true, t18);
+check('解除臣属后可以结盟', t18.afterClearAlly === true, t18);
+check('可以解除战争', t18.warsAfter === 0, t18.warsAfter);
+check('【核心】剧本按需记录外交，没改的字段不写', (() => {
+  const e = run(`return makeScenario({name:'x'}).countries;`);
+  // x 是傀儡国，必须记下宗主与国体
+  const okX = e[t18.x] && e[t18.x].ov === t18.a && e[t18.x].sj === 2;
+  // b 的宗主在测试中途被解除了 → 回到基线值，剧本里不该出现 ov 字段
+  const okB = !e[t18.b] || e[t18.b].ov === undefined;
+  // a 与 y 互为盟友
+  const okA = e[t18.a] && (e[t18.a].al || []).includes(t18.y);
+  return okX && okB && okA;
+})(), run(`return makeScenario({name:'x'}).countries;`));
+
+console.log('\n-- 18b. 外交关系能忠实重建 --');
+const t18b = (() => {
+  const sc = run(`
+    openEditor();
+    const C=countries;
+    const list=C.filter(c=>c&&c.alive&&c.provList.length>2).slice(0,4);
+    const [a,b,x,y]=list.map(c=>c.id);
+    editSetOverlord(b,a,SUBJ_PUPPET);
+    editAddAlly(a,y);
+    editToggleWar(a,x);
+    return { sc:makeScenario({name:'外交重建'}), a,b,x,y };
+  `);
+  const ok = run(`return importScenarioIntoEditor(${JSON.stringify(sc.sc)},'z');`);
+  const after = run(`
+    const C=countries;
+    return { bOv:C[${sc.b}].overlord, bSj:C[${sc.b}].subject,
+             aAlly:(C[${sc.a}].allies||[]).includes(${sc.y}), yAlly:(C[${sc.y}].allies||[]).includes(${sc.a}),
+             war:wars.some(w=>(w.a===${sc.a}&&w.d===${sc.x})||(w.a===${sc.x}&&w.d===${sc.a})),
+             campShared:campOf(${sc.b}).has(${sc.a}) };
+  `);
+  return { ok, after, sc };
+})();
+check('重建成功', t18b.ok === true, t18b.ok);
+check('【核心】傀儡关系重建', t18b.after.bOv === t18b.sc.a && t18b.after.bSj === 2, t18b.after);
+check('【核心】盟友关系双向重建', t18b.after.aAlly === true && t18b.after.yAlly === true, t18b.after);
+check('【核心】战争状态重建', t18b.after.war === true, t18b.after);
+check('属国被正确算进宗主阵营（外交/战争逻辑生效）', t18b.after.campShared === true, t18b.after);
+
+const t18c = run(`
+  // 关系指向不存在的国家时要被忽略，不能崩
+  const sc={ v:1, base:'ne110m', seed:987654321, name:'脏外交',
+             countries:{ '44':{ ov:99999, sj:9, al:[88888,44] } }, provinces:{}, armies:[] };
+  const ok=importScenarioIntoEditor(sc,'脏');
+  const c=countries[44];
+  return { ok, ov:c.overlord, sj:c.subject, al:c.allies, on:editMode.on };
+`);
+check('非法宗主/盟友被忽略', t18c.ok === true && t18c.ov === 0 && t18c.sj === 0 && t18c.al.length === 0, t18c);
+
+/* ================= 19. 兼容老地图 ================= */
+console.log('\n-- 19. 老地图（没有外交字段的 v1 剧本）仍然兼容 --');
+const t19 = run(`
+  // 模拟编辑器在"加外交功能之前"导出的文件：只有省份/国家/军队，没有 ov/sj/al/wars
+  const old={ v:1, base:'ne110m', seed:987654321, name:'老地图', author:'古人', desc:'',
+              countries:{ '44':{ n:'老法国', c:'10,20,30' } },
+              provinces:{ '1':{ o:44, t:9 }, '2':{ n:'老街' } },
+              armies:[{ o:44, p:1, s:3000 }] };
+  const bad=validateScenario(old);
+  const ok=importScenarioIntoEditor(old,'老地图');
+  const c=countries[44];
+  return { bad, ok, name:c.name, color:c.color, ov:c.overlord, sj:c.subject,
+           al:(c.allies||[]).length, wars:wars.length, armyN:armies.length,
+           p1:provinces[1].owner, p1t:provinces[1].tax, p2n:provinces[2].name,
+           mapName:editMode.name };
+`);
+check('老剧本通过校验', t19.bad === null, t19.bad);
+check('老剧本能导入', t19.ok === true, t19.ok);
+check('国名/旗色照常生效', t19.name === '老法国' && t19.color.join(',') === '10,20,30', t19);
+check('省份改动照常生效', t19.p1 === 44 && t19.p1t === 9 && t19.p2n === '老街', t19);
+check('军队照常生效', t19.armyN === 1, t19);
+check('【核心】没有外交字段 = 没有外交关系（不是报错）',
+  t19.ov === 0 && t19.sj === 0 && t19.al === 0 && t19.wars === 0, t19);
+check('导入后可以直接再导出/再提交', run(`return !!makeScenario({name:'x'}).provinces['1'];`) === true);
+
+const t19b = run(`
+  // 老地图重新导出 → 再导入，仍然一致（不会因为新字段而漂移）
+  const old={ v:1, base:'ne110m', seed:987654321, name:'老地图2',
+              countries:{ '44':{ n:'老法国2', c:'10,20,30' } },
+              provinces:{ '1':{ o:44, t:9 } }, armies:[] };
+  importScenarioIntoEditor(old,'老地图2');
+  const again=makeScenario({name:'老地图2'});
+  importScenarioIntoEditor(again,'x');
+  const again2=makeScenario({name:'老地图2'});
+  return { same:JSON.stringify(again)===JSON.stringify(again2),
+           keys:Object.keys(again).sort().join(','),
+           hasWars:!!again.wars, hasDiplo:!!(again.countries['44']&&(again.countries['44'].ov||again.countries['44'].al)) };
+`);
+check('老地图往返两次结果稳定', t19b.same === true, t19b);
+check('没有外交/战争时不会写出多余字段', t19b.hasWars === false && t19b.hasDiplo === false, t19b);
+
 console.log(`\n=== 结果：${failures === 0 ? '全部通过 ✅' : failures + ' 项失败 ❌'} ===\n`);
 process.exit(failures ? 1 : 0);

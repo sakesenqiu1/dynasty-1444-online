@@ -962,6 +962,9 @@ function editApplySnap(s){
     armies=s.o.map((a,i)=>({id:i+1,owner:a.o,prov:a.p,str:a.s,path:[],prog:0,isNavy:a.n}));
     nextArmy=armies.length+1;
   }
+  else if(s.t==='wars'){
+    wars=s.o.map(w=>({a:w.a,d:w.d,aB:0,dB:0,startDay:dayCount,casA:0,casD:0}));
+  }
   else if(s.t==='cn'){
     // 撤销"新建国家"：不能置 null（会破坏"数组无空洞"的不变量），换成空壳占位
     const id=s.id;
@@ -1176,6 +1179,7 @@ function updateEditBar(){
     <span class="sep2"></span>
     <button class="act" style="background:#1c3320;border-color:#509060;color:#a8e0b0" data-act="edit-new-country" title="凭空造一个新国家，然后把它设为画笔，涂到哪里就归它">➕ 新建国家</button>
     <button class="act danger" data-act="edit-clear-countries" title="把所有国家从地图上抹掉，全部省份变成无主荒地，然后可以重新画">🧹 清空所有国家</button>
+    <button class="act" style="background:#1a2c3e;border-color:#5080b0;color:#aae0ff" data-act="edit-import" title="导入之前「⬇ 下载」保存的地图文件，接着改">⬆ 导入</button>
     <span class="sep2"></span>
     <span class="hint" style="white-space:nowrap">画笔：</span>
     <span class="cd" style="display:inline-block;width:12px;height:12px;background:rgb(${brushCol});border:1px solid #000" title="${escHtml(brushName)}"></span>
@@ -1259,6 +1263,34 @@ function editPanel(){
       <div class="row"><span>首都</span>${b.capital?escHtml(provinces[b.capital].name):'—'} · 共 ${b.provList.length} 省</div>
       <div><button class="act danger" data-act="edit-absorb" data-v="${b.id}" title="把该国其余省份全部划给当前画笔（画笔为「无主荒地」时就是把它整国抹成荒地）">⚠ 该国并入${editMode.brush===0?'荒地':'他国'}</button></div>
       <div class="hint">「该国并入…」会把它的全部领土交给当前画笔国家，用来删掉不想要的国家。</div>`;
+
+    /* ---- 开局外交关系 ---- */
+    const opts=(sel)=>[...countries].filter(c=>c&&!isVoidCountry(c)&&c.id!==b.id)
+        .sort((x,y)=>(y.alive?1:0)-(x.alive?1:0)||x.name.localeCompare(y.name))
+        .map(x=>`<option value="${x.id}"${x.id===sel?' selected':''}>${escHtml(x.name||('国家'+x.id))}（${x.provList.length}省）</option>`).join('');
+    const ov=overlordOf(b.id);
+    const als=(b.allies||[]).filter(x=>countries[x]);
+    const myWars=wars.filter(w=>w&&(w.a===b.id||w.d===b.id)).map(w=>w.a===b.id?w.d:w.a).filter(x=>countries[x]);
+    h+=`<div class="sep"></div><h4>外交关系（开局时）</h4>
+      <div class="row"><span>宗主</span>${ov
+        ?`<b>${escHtml(countries[ov].name)}</b> <span class="hint">（${b.subject===SUBJ_PUPPET?'傀儡国':'附庸国'}）</span>
+           <button class="act" data-act="edit-clear-ov" data-v="${b.id}">解除臣属</button>`
+        :'<span class="hint">无 · 独立国</span>'}</div>
+      <div class="row"><span>设为属国于</span>
+        <select id="edit-ov-target">${opts(0)}</select>
+        <select id="edit-ov-type"><option value="${SUBJ_VASSAL}"${b.subject===SUBJ_PUPPET?'':' selected'}>附庸国</option><option value="${SUBJ_PUPPET}"${b.subject===SUBJ_PUPPET?' selected':''}>傀儡国</option></select>
+        <button class="act" data-act="edit-set-ov" data-v="${b.id}" title="让该国开局就臣属于所选宗主">设为属国</button></div>
+      <div class="row" style="display:block"><span class="lbl">盟友：</span>${
+        als.length?als.map(x=>`<button class="act" data-act="edit-del-ally" data-v="${x}" title="解除与 ${escHtml(countries[x].name)} 的盟约">${escHtml(countries[x].name)} ×</button>`).join(' ')
+                 :'<span class="hint">无</span>'}
+        <select id="edit-ally-target" style="margin-left:6px">${opts(0)}</select>
+        <button class="act" data-act="edit-add-ally" data-v="${b.id}" title="共同防御：任一方被宣战另一方参战">结盟</button></div>
+      <div class="row" style="display:block"><span class="lbl">交战中：</span>${
+        myWars.length?myWars.map(x=>`<button class="act danger" data-act="edit-war-off" data-v="${x}" title="解除与 ${escHtml(countries[x].name)} 的战争状态">${escHtml(countries[x].name)} ×</button>`).join(' ')
+                     :'<span class="hint">无</span>'}
+        <select id="edit-war-target" style="margin-left:6px">${opts(0)}</select>
+        <button class="act danger" data-act="edit-war-on" data-v="${b.id}" title="两国开局即处于战争状态">宣战</button></div>
+      <div class="hint">附庸不能另有盟约；设附庸时会自动解除它原有的盟约。</div>`;
   }
   return h;
 }
@@ -1296,6 +1328,119 @@ function closeEditor(){
   if(editorFrom==='selectmodal'){ refreshStartLoadBtn(); renderSelectList(''); }
   else { lbShow('entry'); updateMapBadge(); }
 }
+
+/* ---- 导入本地地图文件 ---- */
+function editImport(){
+  const inp=document.createElement('input');
+  inp.type='file'; inp.accept='.json,application/json';
+  inp.style.display='none';
+  inp.addEventListener('change',()=>{
+    const f=inp.files&&inp.files[0];
+    if(f) editImportFile(f);
+    inp.remove();
+  });
+  document.body.appendChild(inp);
+  inp.click();
+}
+async function editImportFile(file){
+  let text='';
+  try{ text=await file.text(); }
+  catch(e){ pushLog('读不到文件：'+e.message,'war'); return; }
+  let sc=null;
+  try{ sc=JSON.parse(text); }
+  catch(e){ pushLog('导入失败：不是合法的 JSON 文件','war'); return; }
+  const bad=validateScenario(sc);
+  if(bad){ pushLog('导入失败：'+bad,'war'); return; }
+  const fallback=String(file.name||'').replace(/\.dynasty-map\.json$/i,'').replace(/\.json$/i,'');
+  if(importScenarioIntoEditor(sc,fallback)) return;
+}
+/* 把一份剧本装进编辑器（导入按钮和大厅入口共用） */
+function importScenarioIntoEditor(sc,fallbackName){
+  const bad=validateScenario(sc);              // 先校验，别拿 null 去取 .seed
+  if(bad){ pushLog('导入失败：'+bad,'war'); return false; }
+  resetWorld(); setSeed(sc.seed||SCENARIO_SEED); buildWorld();
+  captureScenarioBase();                       // 先采基线，导入后还要继续编辑
+  const err=applyScenario(sc,true);            // keepBase：别把基线清掉
+  if(err){ pushLog('导入失败：'+err,'war'); return false; }
+  player=0; started=true; paused=true; speed=2;
+  selectedProv=0; selectedArmy=0; _newCountrySeq=0;
+  const first=countries.find(c=>c&&c.alive&&c.provList.length)||countries.find(c=>c&&c.alive);
+  editMode={on:true,tool:'select',brush:first?first.id:0,sel:0,undo:[],
+            name:sanitizeMapText(sc.name||fallbackName,MAP_NAME_MAX)||'导入的地图',
+            author:sanitizeMapText(sc.author||'',MAP_AUTHOR_MAX),
+            desc:sanitizeMapText(sc.desc||'',MAP_DESC_MAX),
+            dirty:0,busy:false};
+  showOnlyModal(null);
+  $('topbar').classList.remove('hidden');
+  $('modebar').classList.remove('hidden');
+  $('sidepanel').classList.remove('hidden');
+  $('logpanel').classList.remove('hidden');
+  setMode('political');
+  updateTopbar(); updateEditBar(); recolorAll(); rebuildLabels(); refreshPanel(); renderLog();
+  const sc2=makeScenarioQuiet();
+  pushLog(`⬆ 已导入《${editMode.name}》：${Object.keys(sc2.provinces).length} 处省份改动 · ${Object.keys(sc2.countries).length} 处国家改动 · ${(sc2.wars||[]).length} 场战争。可以直接接着改，改完再「⬇ 下载」或「📤 提交审核」。`,'gold');
+  return true;
+}
+/* ---- 外交关系编辑（起始宗主/属国、盟友、战争）---- */
+function editSetOverlord(vassalCid,overlordCid,subjectType){
+  const v=countries[vassalCid], o=countries[overlordCid];
+  if(!v||!o||vassalCid===overlordCid) return;
+  if(v.overlord===overlordCid&&v.subject===subjectType) return;
+  const items=[editSnapCountry(vassalCid),editSnapCountry(overlordCid)];
+  v.overlord=overlordCid;
+  v.subject=subjectType||SUBJ_VASSAL;
+  // 附庸不能另有盟约
+  const al=(v.allies||[]).slice();
+  v.allies=[];
+  for(const x of al){ const cx=countries[x]; if(cx&&cx.allies) cx.allies=cx.allies.filter(y=>y!==vassalCid); }
+  editPushGroup(items);
+  invalidateCamps(); editRefresh();
+  pushLog(`👑 ${v.name} 成为 ${o.name} 的${v.subject===SUBJ_PUPPET?'傀儡国':'附庸国'}`,'gold');
+}
+function editClearOverlord(cid){
+  const c=countries[cid]; if(!c||!c.overlord) return;
+  const o=countries[c.overlord];
+  editPushGroup([editSnapCountry(cid),editSnapCountry(c.overlord)]);
+  c.overlord=0; c.subject=0;
+  invalidateCamps(); editRefresh();
+  pushLog(`${c.name} 脱离 ${o?o.name:'宗主'} 独立`,'');
+}
+function editAddAlly(a,b){
+  if(a===b||!countries[a]||!countries[b]) return;
+  const ca=countries[a], cb=countries[b];
+  if(ca.overlord||cb.overlord){ pushLog('附庸不得另行缔结盟约，请先解除臣属关系','war'); return; }
+  if((ca.allies||[]).includes(b)) return;
+  editPushGroup([editSnapCountry(a),editSnapCountry(b)]);
+  if(!ca.allies) ca.allies=[];
+  if(!cb.allies) cb.allies=[];
+  ca.allies.push(b); cb.allies.push(a);
+  invalidateCamps(); editRefresh();
+  pushLog(`🤝 ${ca.name} 与 ${cb.name} 结为盟友`,'gold');
+}
+function editDelAlly(a,b){
+  const ca=countries[a], cb=countries[b];
+  if(!ca||!cb) return;
+  if(!(ca.allies||[]).includes(b)) return;
+  editPushGroup([editSnapCountry(a),editSnapCountry(b)]);
+  ca.allies=ca.allies.filter(x=>x!==b);
+  if(cb.allies) cb.allies=cb.allies.filter(x=>x!==a);
+  invalidateCamps(); editRefresh();
+  pushLog(`💔 ${ca.name} 与 ${cb.name} 解除盟约`,'');
+}
+function editToggleWar(a,b){
+  if(a===b||!countries[a]||!countries[b]) return;
+  const w=wars.find(x=>x&&((x.a===a&&x.d===b)||(x.a===b&&x.d===a)));
+  editPushGroup([editSnapWars()]);
+  if(w){
+    wars=wars.filter(x=>x!==w);
+    pushLog(`🕊 ${countries[a].name} 与 ${countries[b].name} 不再交战`,'');
+  } else {
+    wars.push({a,d:b,aB:0,dB:0,startDay:dayCount,casA:0,casD:0});
+    pushLog(`⚔ ${countries[a].name} 与 ${countries[b].name} 开局即处于战争状态`,'war');
+  }
+  invalidateCamps(); editRefresh();
+}
+function editSnapWars(){ return {t:'wars',o:wars.map(w=>({a:w.a,d:w.d}))}; }
 
 /* ---- 地图信息 ---- */
 function editInfoDialog(){
@@ -1526,14 +1671,44 @@ async function loadAdminList(){
     if(!list.length){ $('admin-list').innerHTML='<p class="hint">这里还没有地图。</p>'; return; }
     $('admin-list').innerHTML=list.map(m=>{
       const kb=(m.size/1024).toFixed(1), dt=(m.createdAt||'').replace('T',' ').slice(0,16);
-      return `<div class="c-row" data-act="admin-preview" data-v="${m.id}" title="点击预览这张地图">
-        <span class="cd" style="background:#6a5a9a"></span>
-        <span class="cn"><b>${escHtml(m.name)}</b> <span class="hint">by ${escHtml(m.author||'匿名')}</span></span>
-        <span class="cs">${m.provinces||0} 省改动 · ${m.countries||0} 国改动 · ${kb}KB · ${dt} · ▶${m.plays||0}</span>
-      </div>
-      ${m.desc?`<div class="hint" style="margin:-4px 0 6px 25px">${escHtml(m.desc)}</div>`:''}`;
+      const isPending=m.status==='pending'||adminTab==='pending';
+      /* 通过/拒绝直接做进列表：不用先预览再审核，点一下就行。
+         预览（看地图长什么样）仍然保留，但它是可选的。 */
+      const acts=
+        `<button class="act" style="background:#1c3320;border-color:#509060;color:#a8e0b0" data-act="admin-approve" data-v="${m.id}" title="立刻通过并放到地图大厅">✅ 通过</button>`+
+        (isPending?`<button class="act danger" data-act="admin-reject" data-v="${m.id}" title="拒绝这张地图">❌ 拒绝</button>`:'')+
+        `<button class="act" data-act="admin-preview" data-v="${m.id}" title="先把地图套到世界里看看再决定">👁 预览</button>`+
+        `<button class="act" data-act="admin-delete" data-v="${m.id}" title="永久删除">🗑</button>`;
+      return `<div class="c-row" style="cursor:default;align-items:flex-start">
+        <span class="cd" style="background:#6a5a9a;margin-top:3px"></span>
+        <span class="cn" style="line-height:1.6"><b>${escHtml(m.name)}</b> <span class="hint">by ${escHtml(m.author||'匿名')}</span>
+          <span class="hint">· ${m.provinces||0} 省改动 · ${m.countries||0} 国改动 · ${kb}KB · ${dt}${m.plays?` · ▶${m.plays}`:''}</span>
+          ${m.desc?`<div class="hint">${escHtml(m.desc)}</div>`:''}
+          <div style="margin-top:4px">${acts}</div>
+        </span>
+      </div>`;
     }).join('');
   }catch(e){ $('admin-list').innerHTML=`<p class="hint" style="color:#ff9080">${escHtml(e.message)}</p>`; }
+}
+/* 列表里的一键通过 / 拒绝 / 删除（不需要先预览） */
+async function adminQuick(action,id){
+  if(!id) return;
+  let note='';
+  if(action==='reject'){
+    note=prompt('拒绝理由（会展示给提交者，可留空）：','')||'';
+  } else if(action==='delete'){
+    if(!confirm('确定要永久删除这张地图吗？（不可恢复）')) return;
+  }
+  try{
+    const path=(action==='delete')?'/api/admin/delete':'/api/admin/review';
+    const body=(action==='delete')?{id}:{id,action,note};
+    const r=await fetch(apiBase()+path,{method:'POST',headers:adminHeaders(),body:JSON.stringify(body)});
+    const j=await r.json().catch(()=>null);
+    if(!j||!j.ok){ alert((j&&j.err)||'操作失败'); return; }
+    pushLog(action==='approve'?'✅ 地图已通过审核，现在可以在「🗺 地图大厅」里看到了'
+           :action==='reject'?'❌ 地图已被拒绝':'🗑 地图已删除','gold');
+    loadAdminList();
+  }catch(e){ alert('操作失败：'+e.message); }
 }
 /* 预览：把这张地图套到背景世界并画出来 */
 async function adminPreview(id){
@@ -2079,6 +2254,7 @@ document.addEventListener('click',e=>{
     case 'rename-self': renameSelf(); break;
     /* ---- 地图编辑器 ---- */
     case 'open-editor': editorFrom=(!$('selectmodal').classList.contains('hidden'))?'selectmodal':'lobby'; openEditor(); break;
+    case 'import-map': editImport(); break;
     case 'sel-back': showOnlyModal('lobby'); lbShow('entry'); updateMapBadge(); break;
     /* ---- 地图大厅 ---- */
     case 'map-hall': openMapHall(); break;
@@ -2092,6 +2268,9 @@ document.addEventListener('click',e=>{
     case 'admin-logout': adminLogout(); break;
     case 'admin-tab': adminTab=v||'pending'; loadAdminList(); break;
     case 'admin-preview': adminPreview(v); break;
+    case 'admin-approve': adminQuick('approve',v); break;
+    case 'admin-reject': adminQuick('reject',v); break;
+    case 'admin-delete': adminQuick('delete',v); break;
     case 'admin-pv-back': adminStopPreview(); break;
     case 'admin-pv-approve': adminReview('approve'); break;
     case 'admin-pv-reject': adminReview('reject'); break;
@@ -2113,6 +2292,14 @@ document.addEventListener('click',e=>{
     case 'edit-pname-set': { const i=$('edit-pname'); if(i) editSetProvName(+v,i.value); break; }
     case 'edit-cname-set': { const i=$('edit-cname'); if(i) editSetCountryName(editMode.brush,i.value); break; }
     case 'edit-ccolor': editSetCountryColor(+v, String(el.dataset.rgb||'').split(',').map(Number)); break;
+    case 'edit-import': editImport(); break;
+    case 'edit-set-ov': { const t=$('edit-ov-target'), k=$('edit-ov-type');
+      editSetOverlord(+v, t?+t.value:0, k?+k.value:SUBJ_VASSAL); break; }
+    case 'edit-clear-ov': editClearOverlord(+v); break;
+    case 'edit-add-ally': { const t=$('edit-ally-target'); editAddAlly(+v, t?+t.value:0); break; }
+    case 'edit-del-ally': editDelAlly(editMode.brush,+v); break;
+    case 'edit-war-on': { const t=$('edit-war-target'); editToggleWar(+v, t?+t.value:0); break; }
+    case 'edit-war-off': editToggleWar(editMode.brush,+v); break;
     case 'edit-absorb': editAbsorb(+v); break;
     case 'edit-army-add': { const i=$('edit-army-str'); editAddArmy(+v, i?i.value:5000, false); break; }
     case 'edit-army-add-navy': { const i=$('edit-army-str'); editAddArmy(+v, i?i.value:5000, true); break; }

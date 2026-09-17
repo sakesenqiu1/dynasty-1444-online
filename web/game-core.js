@@ -1789,6 +1789,15 @@ function makeScenario(meta){
   for(const a of armies){
     s.armies.push({o:a.owner,p:a.prov,s:Math.round(a.str),n:a.isNavy?1:0});
   }
+  /* 起始战争：存成 [a,d] 数对。老地图没有这个字段 → 就是没有战争。 */
+  const wp=[];
+  for(const w of wars){
+    if(!w||typeof w.a!=='number'||typeof w.d!=='number') continue;
+    const ca=countries[w.a], cd=countries[w.d];
+    if(!ca||!cd||!ca.alive||!cd.alive) continue;
+    wp.push(w.a<w.d?[w.a,w.d]:[w.d,w.a]);
+  }
+  if(wp.length) s.wars=wp;
   return s;
 }
 
@@ -1801,6 +1810,7 @@ function scenarioHash(s){
   const pk=Object.keys(s.provinces||{}).map(Number).sort((a,b)=>a-b);
   for(const i of pk){ const o=s.provinces[i]; parts.push('p'+i+':'+[o.o,o.t,o.p,o.m,o.n].join(',')); }
   for(const a of (s.armies||[])) parts.push('a'+a.o+':'+a.p+','+a.s+','+a.n);
+  for(const wp of (s.wars||[])) parts.push('w'+wp[0]+'-'+wp[1]);
   parts.push('v'+s.v,'b'+s.base,'s'+(s.seed>>>0));
   const str=parts.join('|');
   let h=2166136261>>>0;
@@ -1816,6 +1826,7 @@ function validateScenario(s){
   if(s.countries&&(typeof s.countries!=='object'||Array.isArray(s.countries))) return 'countries 字段非法';
   if(s.provinces&&(typeof s.provinces!=='object'||Array.isArray(s.provinces))) return 'provinces 字段非法';
   if(s.armies&&!Array.isArray(s.armies)) return 'armies 字段非法';
+  if(s.wars&&!Array.isArray(s.wars)) return 'wars 字段非法';
   return null;
 }
 
@@ -1832,8 +1843,10 @@ function makeVoidCountry(id){
 function isVoidCountry(c){ return !!c && c.featId==='VOID' && !c.provList.length; }
 
 /* 把剧本套用到"刚 buildWorld() 出来的全新世界"上。
-   调用方必须先 resetWorld() → setSeed(seed) → buildWorld()。 */
-function applyScenario(s){
+   调用方必须先 resetWorld() → setSeed(seed) → buildWorld()。
+   keepBase=true 时保留"默认世界基线"——编辑器导入一张地图后还要继续编辑，
+   基线一丢就没法再算差分了。 */
+function applyScenario(s,keepBase){
   const bad=validateScenario(s);
   if(bad) return bad;
   /* ---- 先把国家表的规模定下来 ----
@@ -1931,9 +1944,17 @@ function applyScenario(s){
   }
   recruits=[]; nextRecruit=1;
   wars=[]; truces={};
+  const warPairs=Array.isArray(s.wars)?s.wars:[];
+  for(const pair of warPairs){
+    const a=+((pair&&pair.a)||(pair&&pair[0]))|0, d=+((pair&&pair.d)||(pair&&pair[1]))|0;
+    if(!a||!d||a===d) continue;
+    if(!countries[a]||!countries[d]||!countries[a].alive||!countries[d].alive) continue;
+    if(wars.some(w=>(w.a===a&&w.d===d)||(w.a===d&&w.d===a))) continue;
+    wars.push({a,d,aB:0,dB:0,startDay:0,casA:0,casD:0});
+  }
   invalidateCamps();
   labelsDirty=true;
-  _scenBase=null;     // 世界已不是"默认世界"，基线作废
+  if(!keepBase) _scenBase=null;     // 世界已不是"默认世界"，基线作废
   return null;
 }
 

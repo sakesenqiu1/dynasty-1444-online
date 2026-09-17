@@ -381,7 +381,8 @@ console.log('\n-- 15. 静态检查：入口按钮不重复 --');
   // 所以这里按**文案**校验唯一性，而不是按 data-act。
   check('「🗺 地图大厅」按钮只有一个', count('🗺 地图大厅') === 1, count('🗺 地图大厅'));
   check('「🛠 地图编辑器」按钮只有一个', count('🛠 地图编辑器') === 1, count('🛠 地图编辑器'));
-  check('「⚙ 管理」按钮只有一个', count('⚙ 管理') === 1, count('⚙ 管理'));
+  check('「⬆ 导入地图」按钮只有一个', count('⬆ 导入地图') === 1, count('⬆ 导入地图'));
+  check('「⚙ 地图审核」按钮只有一个', count('⚙ 地图审核') === 1, count('⚙ 地图审核'));
   check('选国界面用的是「换地图」而不是又一个「地图大厅」', count('🗺 换地图') === 1, count('🗺 换地图'));
   check('选国界面有「返回大厅」', html.includes('data-act="sel-back"'));
   // 所有顶层弹窗初始都应该是 hidden（#lobby 由 init 里 showOnlyModal('lobby') 打开）
