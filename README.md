@@ -287,6 +287,7 @@ node tools/test-recruit-live.mjs    # 征兵集结期线上验证
 node tools/test-vassal-live.mjs     # 建立附庸国线上验证
 node tools/test-puppet-live.mjs     # 傀儡国 / 改色 / 改名线上验证
 node tools/test-ally-live.mjs       # 盟约同步线上验证
+node tools/test-maps-live.mjs       # 地图工坊全链路（提交→审核→联机开局，另需 MAP_ADMIN_PASS）
 node tools/test-pvp-live.mjs        # PvP 和谈线上验证
 node tools/test-load.mjs            # 并发与资源占用
 ```

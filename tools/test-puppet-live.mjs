@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { needEnv } from './env.mjs';
-needEnv(["GS_HOST","GS_PASS","GS_DOMAIN"]);
+needEnv(["GS_HOST", "GS_PASS", "GS_DOMAIN"]);
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
