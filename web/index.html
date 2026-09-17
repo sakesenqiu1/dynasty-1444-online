@@ -221,11 +221,15 @@ kbd{background:#2c271e;border:1px solid #55492c;border-radius:2px;padding:0 4px;
   <div class="mbox">
     <div class="mhead"><h2>选择你的王朝</h2><p>公元1444年11月11日 · 世界群雄并起，选择一个国家开始你的霸业</p></div>
     <div class="mbody">
+      <div class="lb-row" style="margin-bottom:8px;align-items:center">
+        <span id="sel-mapbadge" class="hint"></span>
+        <span style="flex:1"></span>
+        <button class="act" data-act="map-hall" style="font-size:12px">🗺 换地图</button>
+        <button class="act" data-act="sel-back" style="font-size:12px">← 返回大厅</button>
+      </div>
       <input type="text" id="sel-search" placeholder="搜索国家……">
-      <div id="sel-list" style="max-height:340px;overflow-y:auto"></div>
+      <div id="sel-list" style="max-height:320px;overflow-y:auto"></div>
       <div style="margin-top:10px;text-align:right">
-        <button class="act" data-act="map-hall" style="margin-right:10px">🗺 地图大厅</button>
-        <button class="act" data-act="open-editor" style="margin-right:10px">🛠 地图编辑器</button>
         <button class="act" id="btn-start-load" data-act="load" style="display:none;margin-right:10px">📜 读取存档</button>
         <button class="act" data-act="random-start">听天由命（随机）</button>
       </div>

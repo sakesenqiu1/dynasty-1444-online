@@ -121,8 +121,7 @@ function mpResume() {
 }
 function mpSolo() {
   MP.online = false;
-  $id('lobby').classList.add('hidden');
-  $id('selectmodal').classList.remove('hidden');
+  showOnlyModal('selectmodal');
   renderSelectList('');
   refreshStartLoadBtn();
 }
@@ -194,7 +193,7 @@ function mpRenderLobby(m) {
   try { sessionStorage.setItem('gs_session', JSON.stringify({ room: m.room, name: MP.name })); } catch (e) {}
 
   if (MP.inGame) { mpTopbarBadge(); return; }   // 已开局：别把大厅再弹出来
-  $id('lobby').classList.remove('hidden');
+  if (typeof showOnlyModal === 'function') showOnlyModal('lobby'); else $id('lobby').classList.remove('hidden');
   lbShow('room');
   lbMsg('');
   $id('lb-roomcode').textContent = m.room;
@@ -264,8 +263,7 @@ function mpBegin(m) {
   mpSyncMap(m.map);
 
   applySnapshot(m.snapshot);
-  $id('lobby').classList.add('hidden');
-  $id('selectmodal').classList.add('hidden');
+  showOnlyModal(null);              // 开局：所有弹窗（大厅/选国/地图大厅）都收掉
   started = true;
   paused = !!m.paused;
   speed = m.speed || 2;
@@ -603,12 +601,12 @@ function mpApplyOffers(of, so) {
 function mpDefeat(m) {
   paused = true;
   $id('defeat-text').textContent = `${countries[m.country].name} 于公元${cal.y}年失去全部疆土。史官合上了这一页。`;
-  $id('defeatmodal').classList.remove('hidden');
+  if (typeof showOnlyModal === 'function') showOnlyModal('defeatmodal'); else $id('defeatmodal').classList.remove('hidden');
 }
 function mpEnded(m) {
   MP.inGame = false;
   const box = $id('defeat-text');
-  $id('defeatmodal').classList.remove('hidden');
+  if (typeof showOnlyModal === 'function') showOnlyModal('defeatmodal'); else $id('defeatmodal').classList.remove('hidden');
   box.textContent = m.reason || '对局结束';
 }
 

@@ -828,7 +828,7 @@ function showDefeat(cid){
   paused=true;
   const c=countries[cid||player];
   document.getElementById('defeat-text').textContent=`${c?c.name:''} 于公元${cal.y}年失去全部疆土。史官合上了这一页。`;
-  document.getElementById('defeatmodal').classList.remove('hidden');
+  showOnlyModal('defeatmodal');
 }
 
 /* =====================================================================
@@ -1163,7 +1163,7 @@ function openEditor(){
   selectedProv=0; selectedArmy=0;
   const first=countries.find(c=>c&&c.alive&&c.provList.length>4);
   editMode={on:true,tool:'select',brush:first?first.id:1,sel:0,undo:[],name:'未命名地图',author:'',desc:'',dirty:0,busy:false};
-  $('selectmodal').classList.add('hidden');
+  showOnlyModal(null);                 // 关键：把大厅/所有弹窗都收起来，别挡住编辑
   $('topbar').classList.remove('hidden');
   $('modebar').classList.remove('hidden');
   $('sidepanel').classList.remove('hidden');
@@ -1180,9 +1180,10 @@ function closeEditor(){
   $('sidepanel').classList.add('hidden');
   $('logpanel').classList.add('hidden');
   started=false; player=0;
-  $('selectmodal').classList.remove('hidden');
-  refreshStartLoadBtn();
-  renderSelectList('');
+  // 恢复到进入编辑器之前的那一层（大厅或选国界面）
+  showOnlyModal(editorFrom==='selectmodal'?'selectmodal':'lobby');
+  if(editorFrom==='selectmodal'){ refreshStartLoadBtn(); renderSelectList(''); }
+  else { lbShow('entry'); updateMapBadge(); }
 }
 
 /* ---- 地图信息 ---- */
@@ -1263,9 +1264,9 @@ async function apiGet(path){
   return j;
 }
 
-async function openMapHall(){
-  $('selectmodal').classList.add('hidden');
-  $('hallmodal').classList.remove('hidden');
+async function openMapHall(from){
+  hallFrom=from||((!$('selectmodal').classList.contains('hidden'))?'selectmodal':'lobby');
+  showOnlyModal('hallmodal');
   $('hall-list').innerHTML='<p class="hint">正在读取地图列表……</p>';
   try{
     const j=await apiGet('/api/maps');
@@ -1278,26 +1279,34 @@ async function openMapHall(){
   renderHallList();
 }
 function closeMapHall(){
-  $('hallmodal').classList.add('hidden');
-  $('selectmodal').classList.remove('hidden');
+  const back=(hallFrom==='selectmodal')?'selectmodal':'lobby';
+  showOnlyModal(back);
+  if(back==='selectmodal') renderSelectList('');
+  else { lbShow('entry'); updateMapBadge(); }
 }
 function renderHallList(){
   const q=hallFilter.trim().toLowerCase();
   const list=hallMaps.filter(m=>!q||(m.name||'').toLowerCase().includes(q)||(m.author||'').toLowerCase().includes(q));
-  let h=`<div class="c-row" data-act="hall-official" title="回到原始的世界地图">
+  const usingOfficial=!currentMap;
+  /* 官方地图永远排在第一位，而且明确标出"当前使用" ——
+     没有自定义地图时大厅也不该是一片空白。 */
+  let h=`<div class="c-row${usingOfficial?' diplo-open':''}" data-act="hall-official" title="回到原始的世界地图（2007 省 / 177 国）">
     <span class="cd" style="background:linear-gradient(90deg,#4a7a4a,#3a5a8a)"></span>
-    <span class="cn"><b>官方地图</b> <span class="badge peace">默认</span></span>
+    <span class="cn"><b>官方地图</b> <span class="badge peace">默认</span>${usingOfficial?' <span class="badge self">正在使用</span>':''}</span>
     <span class="cs">Natural Earth 110m · 2007 省 / 177 国</span>
   </div>`;
   if(!list.length){
-    h+=`<p class="hint" style="margin-top:10px">${hallMaps.length?'没有匹配的地图。':'还没有人提交过地图。你可以用「🛠 地图编辑器」做一张，然后提交审核。'}</p>`;
+    h+=`<p class="hint" style="margin-top:12px">${hallMaps.length?'没有匹配的地图。':'还没有人提交过自定义地图。<br>你可以用大厅里的「🛠 地图编辑器」做一张，提交后经管理员审核就会出现在这里。'}</p>`;
+  } else {
+    h+=`<div class="sep"></div><div class="hint" style="margin-bottom:4px">玩家自制地图（${list.length} 张）</div>`;
   }
   for(const m of list){
     const kb=(m.size/1024).toFixed(1);
     const dt=(m.createdAt||'').slice(0,10);
-    h+=`<div class="c-row" data-act="hall-pick" data-v="${m.id}" title="作者：${escHtml(m.author||'匿名')}">
+    const using=currentMap&&currentMap.id===m.id;
+    h+=`<div class="c-row${using?' diplo-open':''}" data-act="hall-pick" data-v="${m.id}" title="作者：${escHtml(m.author||'匿名')}">
       <span class="cd" style="background:#6a5a9a"></span>
-      <span class="cn"><b>${escHtml(m.name)}</b> <span class="hint">by ${escHtml(m.author||'匿名')}</span></span>
+      <span class="cn"><b>${escHtml(m.name)}</b> <span class="hint">by ${escHtml(m.author||'匿名')}</span>${using?' <span class="badge self">正在使用</span>':''}</span>
       <span class="cs">${m.provinces||0} 省改动 · ${kb}KB · ▶${m.plays||0} · ${dt}</span>
     </div>
     ${m.desc?`<div class="hint" style="margin:-4px 0 6px 25px">${escHtml(m.desc)}</div>`:''}`;
@@ -1307,8 +1316,8 @@ function renderHallList(){
 /* 选用官方默认地图 */
 function useOfficialMap(){
   currentMap=null;
-  closeMapHall();
   resetWorld(); setSeed(SCENARIO_SEED); buildWorld();
+  showOnlyModal('selectmodal');
   renderSelectList('');
   updateMapBadge();
 }
@@ -1322,7 +1331,7 @@ async function pickHallMap(id){
     const err=buildWorldFromScenario(j.scenario);
     if(err) throw new Error(err);
     currentMap={id, name:j.meta.name, author:j.meta.author, hash:j.meta.hash, scenario:j.scenario};
-    closeMapHall();
+    showOnlyModal('selectmodal');          // 选完地图接着挑国家
     renderSelectList('');
     updateMapBadge();
     pushLog(`🗺 已选用地图《${j.meta.name}》（${j.meta.author||'匿名'}）· 共 ${Object.keys(j.scenario.provinces||{}).length} 处省份改动`,'gold');
@@ -1333,18 +1342,13 @@ async function pickHallMap(id){
   }
   hallLoading=false;
 }
-/* 选国界面顶部显示当前用的哪张地图 */
+/* 选国界面显示当前用的哪张地图 */
 function updateMapBadge(){
-  const el=$('map-badge'); if(!el) return;
-  if(currentMap){
-    el.innerHTML=`🗺 当前地图：<b style="color:#d0b0ff">${escHtml(currentMap.name)}</b> <span class="hint">by ${escHtml(currentMap.author||'匿名')}</span>
-      <button class="act" style="margin-left:8px;padding:2px 8px;font-size:11px" data-act="map-hall">换一张</button>`;
-    el.style.display='';
-  } else {
-    el.innerHTML=`🗺 当前地图：<b>官方地图</b>
-      <button class="act" style="margin-left:8px;padding:2px 8px;font-size:11px" data-act="map-hall">地图大厅</button>`;
-    el.style.display='';
-  }
+  const txt = currentMap
+    ? `🗺 当前地图：<b style="color:#d0b0ff">${escHtml(currentMap.name)}</b> <span class="hint">by ${escHtml(currentMap.author||'匿名')}</span>`
+    : `🗺 当前地图：<b>官方地图</b>`;
+  const a=$('map-badge');   if(a) a.innerHTML=txt;
+  const b=$('sel-mapbadge');if(b) b.innerHTML=txt;
 }
 
 /* =====================================================================
@@ -1357,8 +1361,8 @@ function updateMapBadge(){
 let adminTok='', adminTab='pending', adminPvId='', adminRestore=null;
 
 function openAdmin(){
-  $('lobby').classList.add('hidden');
-  $('adminmodal').classList.remove('hidden');
+  adminFrom=(!$('selectmodal').classList.contains('hidden'))?'selectmodal':'lobby';
+  showOnlyModal('adminmodal');
   $('admin-msg').textContent='';
   // 会话内已登录就直接进主界面
   if(adminTok&&window.sessionStorage){
@@ -1373,8 +1377,8 @@ function openAdmin(){
 }
 function closeAdmin(){
   if(adminPvId) adminStopPreview();
-  $('adminmodal').classList.add('hidden');
-  $('lobby').classList.remove('hidden');
+  showOnlyModal(adminFrom==='selectmodal'?'selectmodal':'lobby');
+  if(adminFrom==='selectmodal') renderSelectList('');
 }
 async function adminLogin(){
   const pass=$('admin-pass')?$('admin-pass').value:'';
@@ -1435,7 +1439,7 @@ async function adminPreview(id){
   adminPvId=id;
   $('admin-main').classList.add('hidden');
   $('admin-preview').classList.remove('hidden');
-  $('adminmodal').classList.add('hidden');       // 让出屏幕看图
+  $('adminmodal').classList.add('hidden');       // 让出屏幕看图（预览时要看地图，不能有遮罩）
   const m=j.meta;
   $('admin-pv-name').textContent=`${m.name}${m.author?'（'+m.author+'）':''}`;
   $('admin-pv-info').innerHTML=`状态 <b>${j.status}</b> · ${Object.keys(j.scenario.provinces||{}).length} 省改动 · ${Object.keys(j.scenario.countries||{}).length} 国改动 · 编号 ${m.id} · 哈希 ${m.hash}
@@ -1461,7 +1465,7 @@ function adminStopPreview(){
   recolorAll(); rebuildLabels(); updateMapBadge();
   $('admin-preview').classList.add('hidden');
   $('admin-main').classList.remove('hidden');
-  $('adminmodal').classList.remove('hidden');
+  showOnlyModal('adminmodal');
   loadAdminList();
 }
 async function adminReview(action){
@@ -1488,6 +1492,25 @@ async function adminDelete(){
     adminStopPreview();
   }catch(e){ alert('删除失败：'+e.message); }
 }
+
+/* =====================================================================
+   顶层弹窗互斥
+   ---------------------------------------------------------------------
+   所有 .modal 都是 position:absolute + 同一个 z-index:50，同时显示时
+   靠后的 DOM（#lobby 排最后）会盖住前面的；而背景又是半透明的
+   rgba(8,8,10,.78)，于是底下那层的按钮会透出来 ——
+   看起来像"有两个按钮"，点上面那个其实点不到。
+   所以任何弹窗切换都必须走这里，绝不要单独 classList.remove('hidden')。
+   ===================================================================== */
+const TOP_MODALS=['lobby','selectmodal','hallmodal','adminmodal','helpmodal','defeatmodal','slotmodal'];
+function showOnlyModal(id){
+  for(const m of TOP_MODALS){
+    const el=$(m); if(!el) continue;
+    if(m===id) el.classList.remove('hidden'); else el.classList.add('hidden');
+  }
+}
+/* 大厅 / 选择王朝 / 地图大厅 / 管理后台 互相跳转时的"从哪来"，返回时回到原处 */
+let hallFrom='lobby', adminFrom='lobby', editorFrom='lobby';
 
 function refreshPanel(){
   if(!started) return;
@@ -1944,7 +1967,8 @@ document.addEventListener('click',e=>{
     case 'vcolor-close': diploColorFor=0; refreshPanel(); break;
     case 'rename-self': renameSelf(); break;
     /* ---- 地图编辑器 ---- */
-    case 'open-editor': openEditor(); break;
+    case 'open-editor': editorFrom=(!$('selectmodal').classList.contains('hidden'))?'selectmodal':'lobby'; openEditor(); break;
+    case 'sel-back': showOnlyModal('lobby'); lbShow('entry'); updateMapBadge(); break;
     /* ---- 地图大厅 ---- */
     case 'map-hall': openMapHall(); break;
     case 'hall-close': closeMapHall(); break;
@@ -2006,8 +2030,8 @@ document.addEventListener('click',e=>{
       break;
     }
     case 'slot-back': closeSlotModal(); break;
-    case 'help': $('helpmodal').classList.remove('hidden'); break;
-    case 'close-help': $('helpmodal').classList.add('hidden'); break;
+    case 'help': showOnlyModal('helpmodal'); break;
+    case 'close-help': if(started) showOnlyModal(null); else showOnlyModal('lobby'); break;
     case 'start': startGame(+v); break;
     case 'random-start': {
       const alive=[...countries].filter(c=>c&&c.alive);
@@ -2506,7 +2530,7 @@ function loadSaveData(d){
   selectedProv=0; selectedArmy=0; updateSelOverlay();
   if(!started){
     started=true;
-    $('selectmodal').classList.add('hidden');
+    showOnlyModal(null);          // 读档 = 开局，所有弹窗收掉
     $('topbar').classList.remove('hidden');
     $('modebar').classList.remove('hidden');
     $('sidepanel').classList.remove('hidden');
@@ -2548,13 +2572,14 @@ async function openSlotModal(mode){
   $('slot-hint-save').style.display = saving?'':'none';
   $('btn-start-load').style.display='none';
   if(saving) $('slot-name').value = fmtDate();
-  $('slotmodal').classList.remove('hidden');
+  showOnlyModal('slotmodal');
   await renderSlotList();
   if(saving){ const inp=$('slot-name'); inp.focus(); inp.select(); }
 }
 function closeSlotModal(){
-  $('slotmodal').classList.add('hidden');
-  // 若从选国界面打开过，回来后按有无存档决定是否显示读档入口
+  // 存档弹窗只从选国界面进得来；读完/存完回到那里
+  if(started&&player) showOnlyModal(null); else showOnlyModal('selectmodal');
+  // 回来后按有无存档决定是否显示读档入口
   refreshStartLoadBtn();
 }
 async function slotSaveNow(){
@@ -2602,7 +2627,7 @@ function startGame(cid){
   player=cid;
   started=true;
   paused=true;
-  $('selectmodal').classList.add('hidden');
+  showOnlyModal(null);            // 开局：所有弹窗都收掉
   $('topbar').classList.remove('hidden');
   $('modebar').classList.remove('hidden');
   $('sidepanel').classList.remove('hidden');
@@ -2683,15 +2708,16 @@ const tickAsync=()=>new Promise(r=>setTimeout(r,20));
       }
     }catch(e){}
 
-    $('lobby').classList.remove('hidden');
     lbShow('entry');
     updateMapBadge();
+    // 起始只显示大厅；带 ?solo/?admin 参数时由下面按需切换
+    showOnlyModal('lobby');
     try{ const t=sessionStorage.getItem('gs_admin_tok'); if(t) adminTok=t; }catch(e){}
     try{ const q=new URLSearchParams(location.search);
       if(q.get('room')){ $('lb-code').value=q.get('room'); lbShow('entry'); }
-      if(q.get('solo')!==null&&q.get('solo')!==undefined&&q.get('solo')!=='') mpSolo();
       if(q.get('perf')) perfHud=true;
-      if(q.get('admin')) openAdmin();
+      if(q.get('admin')){ showOnlyModal('adminmodal'); openAdmin(); }
+      else if(q.get('solo')!==null&&q.get('solo')!==undefined&&q.get('solo')!=='') mpSolo();
     }catch(e){}
     if(!resumed) lbMsg('');
     requestAnimationFrame(loop);

@@ -290,5 +290,105 @@ check('记下了地图哈希', s12.hashNow === MADE.hash, s12);
 check('同一张图不重复重建', s12.again === false, s12);
 check('切回默认时也重建', s12.back === true && s12.finalName !== '大厅帝国', s12);
 
+/* ================= 13. 弹窗互斥（三个线上 bug 的根因） ================= */
+console.log('\n-- 13. 弹窗互斥：任何时刻只能有一个顶层弹窗 --');
+run(`['lobby','selectmodal','hallmodal','adminmodal','helpmodal','defeatmodal','slotmodal'].forEach(i=>$(i)); return 1;`);
+const visible = () => run(`
+  return ['lobby','selectmodal','hallmodal','adminmodal','helpmodal','defeatmodal','slotmodal']
+    .filter(i=>!$(i).classList.contains('hidden'));
+`);
+
+run(`showOnlyModal('lobby'); return 1;`);
+check('showOnlyModal 只留一个', JSON.stringify(visible()) === JSON.stringify(['lobby']), visible());
+
+run(`mpSolo(); return 1;`);
+check('单机游戏 → 只剩「选择王朝」', JSON.stringify(visible()) === JSON.stringify(['selectmodal']), visible());
+
+/* bug 1：两个地图大厅按钮 —— 根因是两层弹窗同时可见且背景半透明 */
+await run(`openMapHall(); return 1;`);
+await settle();
+check('【bug1】从选国界面开大厅 → 只剩大厅一层', JSON.stringify(visible()) === JSON.stringify(['hallmodal']), visible());
+
+await run(`closeMapHall(); return 1;`);
+check('【bug1】返回回到原来那一层（选国界面）', JSON.stringify(visible()) === JSON.stringify(['selectmodal']), visible());
+
+run(`showOnlyModal('lobby'); lbShow('entry'); return 1;`);
+await run(`openMapHall(); return 1;`);
+await settle();
+check('【bug1】从大厅开大厅 → 只剩大厅一层', JSON.stringify(visible()) === JSON.stringify(['hallmodal']), visible());
+await run(`closeMapHall(); return 1;`);
+check('【bug1】返回回到大厅', JSON.stringify(visible()) === JSON.stringify(['lobby']), visible());
+
+/* bug 2：点编辑器后大厅还留着，挡住编辑界面 */
+run(`editorFrom='lobby'; openEditor(); return 1;`);
+check('【bug2】进编辑器 → 所有弹窗都收起来', JSON.stringify(visible()) === JSON.stringify([]), visible());
+run(`closeEditor(); return 1;`);
+check('【bug2】退出编辑器 → 回到大厅', JSON.stringify(visible()) === JSON.stringify(['lobby']), visible());
+
+run(`mpSolo(); editorFrom='selectmodal'; openEditor(); return 1;`);
+check('【bug2】从选国界面进编辑器 → 也是全收起', JSON.stringify(visible()) === JSON.stringify([]), visible());
+run(`closeEditor(); return 1;`);
+check('【bug2】退出后回到选国界面', JSON.stringify(visible()) === JSON.stringify(['selectmodal']), visible());
+
+/* 管理后台 */
+run(`showOnlyModal('lobby'); adminFrom='lobby'; openAdmin(); return 1;`);
+check('管理后台独占一层', JSON.stringify(visible()) === JSON.stringify(['adminmodal']), visible());
+run(`closeAdmin(); return 1;`);
+check('关掉管理后台回到大厅', JSON.stringify(visible()) === JSON.stringify(['lobby']), visible());
+
+/* 开局必须清空所有弹窗 */
+run(`mpSolo(); showOnlyModal('selectmodal'); startGame(1); started=false; player=0; return 1;`);
+check('开局后所有弹窗都收掉', JSON.stringify(visible()) === JSON.stringify([]), visible());
+run(`closeSlotModal(); return 1;`);
+check('存档弹窗关闭后回到选国界面（未开局）', JSON.stringify(visible()) === JSON.stringify(['selectmodal']), visible());
+
+/* ================= 14. 大厅默认官方地图 ================= */
+console.log('\n-- 14. 地图大厅默认显示官方地图 --');
+run(`currentMap=null; hallMaps=[]; hallFilter=''; renderHallList(); return 1;`);
+const h14 = run(`return document.getElementById('hall-list').innerHTML;`);
+check('【bug3】没有自定义地图时也有官方地图入口', h14.includes('官方地图') && h14.includes('hall-official'), h14.slice(0, 200));
+check('【bug3】官方地图标为「正在使用」', h14.includes('正在使用'), h14.slice(0, 240));
+check('给出了"怎么做出第一张图"的提示', h14.includes('地图编辑器'), h14.slice(0, 400));
+
+run(`hallMaps=[{id:'mX',name:'别人的图',author:'甲',desc:'',hash:'h',size:2048,createdAt:'2026-01-01T00:00:00Z',plays:3,provinces:5,countries:1}]; renderHallList(); return 1;`);
+const h15 = run(`return document.getElementById('hall-list').innerHTML;`);
+check('有自定义地图时官方地图仍排在最前', h15.indexOf('官方地图') < h15.indexOf('别人的图'), h15.slice(0, 300));
+check('自定义地图有分组标题', h15.includes('玩家自制地图'), h15.slice(0, 300));
+check('使用中的自定义地图会被标出', (() => {
+  run(`currentMap={id:'mX',name:'别人的图',author:'甲',hash:'h',scenario:{}}; renderHallList(); return 1;`);
+  const h = run(`return document.getElementById('hall-list').innerHTML;`);
+  const seg = h.slice(h.indexOf('别人的图'));
+  return seg.includes('正在使用');
+})(), h15.slice(0, 300));
+
+/* 选完地图应直接进入选国界面（而不是留在原地） */
+await run(`currentMap=null; pickHallMap('m111'); return 1;`);
+await settle();
+check('【bug3】选中地图后直接进入选国界面', JSON.stringify(visible()) === JSON.stringify(['selectmodal']), visible());
+check('选国界面也显示了当前地图名', run(`return document.getElementById('sel-mapbadge').innerHTML;`).includes('待审图'),
+  run(`return document.getElementById('sel-mapbadge').innerHTML;`).slice(0, 160));
+
+run(`useOfficialMap(); return 1;`);
+check('选官方地图后同样进入选国界面', JSON.stringify(visible()) === JSON.stringify(['selectmodal']), visible());
+check('徽章回到官方地图', run(`return document.getElementById('sel-mapbadge').innerHTML;`).includes('官方地图'));
+
+/* ================= 15. 按钮不重复（静态检查） ================= */
+console.log('\n-- 15. 静态检查：入口按钮不重复 --');
+{
+  const html = read('web/index.html');
+  const count = (s) => (html.split(s).length - 1);
+  // 「换地图」和「地图大厅」是同一个 action，但文案不同、处于互斥的两层弹窗里，
+  // 所以这里按**文案**校验唯一性，而不是按 data-act。
+  check('「🗺 地图大厅」按钮只有一个', count('🗺 地图大厅') === 1, count('🗺 地图大厅'));
+  check('「🛠 地图编辑器」按钮只有一个', count('🛠 地图编辑器') === 1, count('🛠 地图编辑器'));
+  check('「⚙ 管理」按钮只有一个', count('⚙ 管理') === 1, count('⚙ 管理'));
+  check('选国界面用的是「换地图」而不是又一个「地图大厅」', count('🗺 换地图') === 1, count('🗺 换地图'));
+  check('选国界面有「返回大厅」', html.includes('data-act="sel-back"'));
+  // 所有顶层弹窗初始都应该是 hidden（#lobby 由 init 里 showOnlyModal('lobby') 打开）
+  const modals = ['selectmodal', 'hallmodal', 'adminmodal', 'helpmodal', 'defeatmodal', 'slotmodal'];
+  const notHidden = modals.filter(id => !new RegExp('id="' + id + '" class="modal hidden"').test(html));
+  check('除大厅外的弹窗初始都是隐藏的', notHidden.length === 0, notHidden);
+}
+
 console.log(`\n=== 结果：${failures === 0 ? '全部通过 ✅' : failures + ' 项失败 ❌'} ===\n`);
 process.exit(failures ? 1 : 0);
