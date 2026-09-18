@@ -1196,6 +1196,7 @@ function updateEditBar(){
     <span class="hint" style="white-space:nowrap">已改 ${total} 省 / ${ctotal} 国</span>
     <button class="act" style="background:#1c3320;border-color:#509060;color:#a8e0b0" data-act="edit-download" title="把这张地图保存成 .json 下载到本地">⬇ 下载</button>
     <button class="act" style="background:#2a2440;border-color:#6a5a9a;color:#d0b0ff" data-act="edit-submit" title="提交给管理员审核，通过后会出现在地图大厅">📤 提交审核</button>
+    ${loadMapDraft()?`<button class="act" style="background:#3a2c1c;border-color:#a08040;color:#ffd890" data-act="edit-resubmit" title="上次提交没成功，草稿还在本地，点这里重提">↻ 重提草稿</button>`:''}
     <button class="act" data-act="edit-exit" title="放弃编辑并返回">✕ 退出</button>`;
   const sel=$('edit-brush');
   if(sel) sel.value=String(editMode.brush);
@@ -1304,6 +1305,11 @@ function editRefresh(){ updateEditBar(); if(editMode.on) refreshPanel(); }
 
 /* ---- 进入 / 退出 ---- */
 function openEditor(){
+  /* 本地还有没提交成功的草稿就先问一句 —— 别让一次网络抖动把作品弄丢 */
+  const d=loadMapDraft();
+  if(d&&confirm(`本地存着上次没提交成功的《${d.name||'未命名地图'}》\n（暂存于 ${new Date(d.at).toLocaleString()}）\n\n点「确定」= 恢复它接着改\n点「取消」= 从空白世界开始新地图（草稿仍保留，可用「↻ 重提草稿」交上去）`)){
+    return importScenarioIntoEditor(d.sc, d.name);
+  }
   MP.online=false;
   resetWorld(); setSeed(SCENARIO_SEED); buildWorld();
   captureScenarioBase();
@@ -1474,6 +1480,41 @@ function editDownload(){
     pushLog(`⬇ 已下载「${editMode.name}」（${text.length} 字节）到本地`,'gold');
   }catch(e){ pushLog('浏览器不允许直接下载，已把内容打印到日志','war'); pushLog(text); }
 }
+/* ---- 提交草稿：网络抖动不能让你白画一张图 ----
+   提交前先把剧本暂存到 localStorage，成功后才清掉。
+   连接被重置（ERR_CONNECTION_CLOSED）时刷新页面也能一键重提。 */
+const MAP_DRAFT_KEY='gs_map_draft';
+function saveMapDraft(sc){
+  try{ localStorage.setItem(MAP_DRAFT_KEY, JSON.stringify({sc, name:editMode.name, at:Date.now()})); }catch(e){}
+}
+function loadMapDraft(){
+  try{ const d=JSON.parse(localStorage.getItem(MAP_DRAFT_KEY)||'null'); return (d&&d.sc)?d:null; }catch(e){ return null; }
+}
+function clearMapDraft(){ try{ localStorage.removeItem(MAP_DRAFT_KEY); }catch(e){} }
+/* 带重试的 POST：链路抖动（连接被重置/超时）时自动重试，服务端返回的错误不重试 */
+async function apiPostRetry(path, body, tries){
+  tries=tries||3;
+  let lastErr=null;
+  for(let i=0;i<tries;i++){
+    try{
+      const r=await fetch(apiBase()+path,{
+        method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body),
+      });
+      const j=await r.json().catch(()=>null);
+      if(j) return {ok:true, body:j, status:r.status};
+      lastErr=new Error('服务器返回了无法解析的内容（HTTP '+r.status+'）');
+    }catch(e){
+      // fetch 抛异常 = 网络层问题（连接被重置、超时……），值得重试
+      lastErr=e;
+    }
+    if(i<tries-1){
+      const wait=700*(i+1);
+      pushLog(`⚠ 第 ${i+1} 次提交失败（${lastErr.message}），${(wait/1000).toFixed(1)} 秒后重试……`,'war');
+      await new Promise(r=>setTimeout(r,wait));
+    }
+  }
+  return {ok:false, err:lastErr};
+}
 /* ---- 提交审核 ---- */
 async function editSubmit(){
   if(editMode.busy) return;
@@ -1485,24 +1526,40 @@ async function editSubmit(){
     pushLog('请先点「📝 未命名地图」填写地图名称','war'); editInfoDialog(); return;
   }
   editMode.busy=true;
+  saveMapDraft(sc);                       // 先存本地，失败也不丢
   pushLog('正在提交，请稍候……');
-  try{
-    // 独立域名挂在根路径、IP 站点挂在 /gs/ 下，两种入口都要能取到 API
-    const base=(location.pathname.replace(/[^/]*$/,'')||'/').replace(/\/$/,'');
-    const r=await fetch(base+'/api/maps',{
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({meta:{name:editMode.name,author:editMode.author,desc:editMode.desc},scenario:sc}),
-    });
-    const j=await r.json().catch(()=>({ok:false,err:'服务器返回了无法解析的内容'}));
-    if(j.ok){
-      pushLog(`📤 提交成功！编号 ${j.id}，等待管理员审核。通过后会出现在「地图大厅」。`,'gold');
-    } else {
-      pushLog('提交失败：'+(j.err||('HTTP '+r.status)),'war');
-    }
-  }catch(e){
-    pushLog('提交失败：'+e.message,'war');
-  }
+  const r=await apiPostRetry('/api/maps',{meta:{name:editMode.name,author:editMode.author,desc:editMode.desc},scenario:sc},3);
   editMode.busy=false;
+  if(!r.ok){
+    pushLog(`📤 提交失败：${r.err?r.err.message:r.err}`,'war');
+    pushLog('⚠ 地图已暂存在本地，网络恢复后点工具栏的「📤 提交审核」即可重提；也可以改用备用入口 http://${GS_HOST}/gs/ 打开本页再提交。','war');
+    refreshPanel();
+    return;
+  }
+  const j=r.body;
+  if(j.ok){
+    clearMapDraft();
+    pushLog(`📤 提交成功！编号 ${j.id}，等待管理员审核。通过后会出现在「地图大厅」。`,'gold');
+  } else {
+    // 服务端明确拒绝（版本不符/重复提交……）不是网络问题，不用重试也不用留草稿
+    if(/已经提交过/.test(j.err||'')) clearMapDraft();
+    pushLog('提交失败：'+(j.err||('HTTP '+r.status)),'war');
+  }
+  refreshPanel();
+}
+/* 把上次没提交成功的草稿重新交上去 */
+async function resubmitDraft(){
+  const d=loadMapDraft();
+  if(!d){ pushLog('本地没有待提交的草稿'); return; }
+  if(!confirm(`重新提交上次暂存的《${d.name||'未命名地图'}》？\n（暂存于 ${new Date(d.at).toLocaleString()}）`)) return;
+  editMode.busy=true;
+  pushLog(`正在重新提交《${d.name}》……`);
+  const r=await apiPostRetry('/api/maps',{meta:{name:d.name,author:d.sc.author||'',desc:d.sc.desc||''},scenario:d.sc},3);
+  editMode.busy=false;
+  if(!r.ok){ pushLog(`📤 重提失败：${r.err?r.err.message:r.err}（草稿仍在本地）`,'war'); refreshPanel(); return; }
+  if(r.body.ok){ clearMapDraft(); pushLog(`📤 提交成功！编号 ${r.body.id}，等待管理员审核。`,'gold'); }
+  else { if(/已经提交过/.test(r.body.err||'')) clearMapDraft(); pushLog('提交失败：'+(r.body.err||''),'war'); }
+  refreshPanel();
 }
 
 /* =====================================================================
@@ -2295,6 +2352,7 @@ document.addEventListener('click',e=>{
     case 'edit-clear-countries': editClearAllCountries(); break;
     case 'edit-download': editDownload(); break;
     case 'edit-submit': editSubmit(); break;
+    case 'edit-resubmit': resubmitDraft(); break;
     case 'edit-clear-armies': editClearArmies(); break;
     case 'edit-paint-here': editPaint(+v); break;
     case 'edit-capital-here': editSetCapital(+v); break;
