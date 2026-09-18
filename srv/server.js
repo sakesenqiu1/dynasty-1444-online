@@ -319,7 +319,12 @@ class Room {
       case 'war': {
         const t = +m.target;
         if (core.overlordOf(t)) throw new Error('附庸国不可直接宣战，请向宗主宣战');
-        if (core.atWar(me, t) || core.truceBetween(me, t)) throw new Error('已处于战争或停战状态');
+        if (core.atWar(me, t)) throw new Error('已处于战争状态');
+        /* 独立战争（附庸打自己的宗主）不受停战约束 —— 否则被打服的附庸会被锁死十年 */
+        if (!core.isIndepWar(me, t) && core.truceBetween(me, t)) {
+          const left = Math.max(0, (st.truces[core.truceKey(me, t)] || 0) - st.dayCount);
+          throw new Error(`仍在停战期内（还有 ${Math.ceil(left / 30)} 个月），无法宣战`);
+        }
         core.declareWar(me, t);
         break;
       }
@@ -353,8 +358,7 @@ class Room {
         const cost = Math.round(60 + core.totalDev(tc) * 2);
         if (st.countries[me].gold < cost) throw new Error('国库不足');
         st.countries[me].gold -= cost;
-        tc.overlord = me;
-        tc.subject = core.SUBJ_VASSAL;      // 花钱册封 = 普通附庸国
+        core.setOverlord(t, me, core.SUBJ_VASSAL);   // 花钱册封 = 普通附庸国（内部会失效阵营缓存）
         core.clearAllAlliances(t);
         st.truces[core.truceKey(me, t)] = st.dayCount + 3650;
         core.pushLog(`👑 ${tc.name} 接受册封，岁贡三成，为我藩篱`, 'gold', me);
@@ -372,10 +376,9 @@ class Room {
         st.countries[me].gold -= cost;
         // 被吞并国的附庸转奉我为宗主（沿用其原有国体：傀儡仍是傀儡）
         const inherited = st.countries.filter(vc => vc && vc.alive && vc.overlord === t);
-        for (const vc of inherited) vc.overlord = me;
+        for (const vc of inherited) core.setOverlord(vc.id, me, vc.subject);
         for (const pid of [...tc.provList]) core.transferProvince(pid, me);
-        tc.overlord = 0;
-        tc.subject = 0;
+        core.setOverlord(t, 0);
         core.pushLog(`👑 ${tc.name} 王祚断绝，疆土尽入我朝`, 'gold', me);
         for (const vc of inherited) core.pushLog(`👑 ${vc.name} 转奉我朝为主，为我藩属`, 'gold', me);
         break;
@@ -384,8 +387,7 @@ class Room {
         const t = +m.target;
         const tc = st.countries[t];
         if (!tc || core.overlordOf(t) !== me) throw new Error('对方不是你的附庸');
-        tc.overlord = 0;
-        tc.subject = 0;
+        core.setOverlord(t, 0);
         st.truces[core.truceKey(me, t)] = st.dayCount + 1825;
         core.pushLog(`${tc.name} 重获独立，与我朝约定五年之好`, '', me);
         break;
@@ -482,8 +484,7 @@ class Room {
         const use = chosen.length ? chosen : provs;
         for (const pid of use) core.transferProvince(pid, t);
         tc.alive = true;
-        tc.overlord = me;
-        tc.subject = core.SUBJ_VASSAL;      // 于故土复国 = 普通附庸国
+        core.setOverlord(t, me, core.SUBJ_VASSAL);   // 于故土复国 = 普通附庸国
         st.truces[core.truceKey(me, t)] = st.dayCount + 1825;
         core.pushLog(`👑 ${tc.name} 依我朝扶持，于故土复国，奉我为宗主（${use.length}省）`, 'gold', me);
         break;
@@ -581,7 +582,7 @@ class Room {
           core.vassalize(proposer, me);
           break;
         }
-        if (o.indep) { st.countries[proposer].overlord = 0; st.countries[proposer].subject = 0; }
+        if (o.indep) core.setOverlord(proposer, 0);
         const rels = (o.releases || []).filter(cid => core.overlordOf(cid) === me);
         core.makePeace(w, transfers, true, rels);
         break;
@@ -617,8 +618,7 @@ class Room {
           this.proposePeace(me, enemy, w, [], [], { indep: true });
           break;
         }
-        st.countries[me].overlord = 0;
-        st.countries[me].subject = 0;
+        core.setOverlord(me, 0);
         core.pushLog(`🎌 ${st.countries[me].name} 赢得独立战争，脱离 ${st.countries[enemy].name} 自立！`, 'gold', me);
         core.makePeace(w, [], true);
         break;

@@ -1839,7 +1839,11 @@ function renderDiploList(){
     // 色点：我方属国浅紫/深紫、盟友蓝、交战红、停战橙；中立国用本国旗色
     const dotCol=relDotColor(c.id);
     // 附庸国不可直接宣战（要打就打宗主）；宗主附庸关系另见徽章
-    const canWar=!ov&&!atWar(player,c.id)&&!truceBetween(player,c.id);
+    // 独立战争（附庸对自己的宗主宣战）不受停战限制
+    const indepWar=isIndepWar(player,c.id);
+    const canWar=!ov&&!atWar(player,c.id)&&(indepWar||!truceBetween(player,c.id));
+    const warTip=indepWar?'⚔ 对他的宗主宣战 = 独立战争（不受停战约束）'
+                :(truceBetween(player,c.id)?'停战期内无法宣战':'宣战');
     const isAlly=isAllied(player,c.id);
     // 结盟：双方均非附庸、无战事、无停战（共同防御之约）
     const canAlly=!isAlly&&!ov&&!isMine&&!overlordOf(player)&&!atWar(player,c.id)&&!truceBetween(player,c.id)&&!inWar(c.id)&&!inWar(player);
@@ -1864,7 +1868,7 @@ function renderDiploList(){
     }
     if(isAlly) btns+=` <button class="act" style="margin:0;background:#1c3320;border-color:#509060;color:#a8e0b0" data-act="diplo-unally" data-v="${c.id}" title="解除盟约">断盟</button>`;
     else if(canAlly) btns+=` <button class="act" style="margin:0;background:#1c3320;border-color:#509060;color:#a8e0b0" data-act="diplo-ally" data-v="${c.id}" title="共同防御：任一方被宣战，另一方参战">结盟</button>`;
-    if(canWar) btns+=` <button class="act" style="margin:0" data-act="declare" data-v="${c.id}">宣战</button>`;
+    if(canWar) btns+=` <button class="act" style="margin:0${indepWar?';background:#3a1c1c;border-color:#a05050;color:#ffb0b0':''}" data-act="declare" data-v="${c.id}" title="${warTip}">${indepWar?'⚔ 独立战争':'宣战'}</button>`;
     const open=diploFocus===c.id||diploColorFor===c.id;
     h+=`<div class="c-row${ov?' vassal':''}${isMine?' my':''}${open?' diplo-open':''}" data-act="diplo-info" data-v="${c.id}" title="${ov?`附庸国，点击查看宗主 ${countries[ov].name}`:'点击查看其附庸'}">
       <span class="cd" style="background:rgb(${dotCol.map(v=>v|0)})"></span>
@@ -2406,11 +2410,21 @@ function doDeclare(cid){
   if(MP.online) return mpCmd({c:'war',target:cid});
   if(overlordOf(cid)){
     if(overlordOf(cid)===player) pushLog(`${countries[cid].name} 是我朝附庸，如要收回疆土请在外交页吞并`);
-    else pushLog(`${countries[cid].name} 是 ${countries[overlordOf(cid)].name} 的附庸，应向其宗主宣战`);
+    else pushLog(`${countries[cid].name} 是 ${countries[overlordOf(cid)].name} 的附庸，应向其宗主宣战`,'war');
     return;
   }
-  if(atWar(player,cid)||truceBetween(player,cid)) return;
+  const t=countries[cid];
+  if(atWar(player,cid)){ pushLog(`我朝已与 ${t.name} 交战之中`,'war'); return; }
+  /* 独立战争不受停战约束：附庸对自己的宗主随时可以揭竿而起 */
+  const indep=isIndepWar(player,cid);
+  if(!indep&&truceBetween(player,cid)){
+    const left=Math.max(0,(truces[truceKey(player,cid)]||0)-dayCount);
+    pushLog(`与 ${t.name} 仍在停战期内（还有 ${Math.ceil(left/30)} 个月），无法宣战`,'war');
+    return;
+  }
+  if(!t){ pushLog('该国已不存在','war'); return; }
   declareWar(player,cid);
+  if(indep) pushLog(`⚔ 我朝向宗主 ${t.name} 宣战，为独立而战！`,'gold');
   uiTab='war';
   document.querySelectorAll('#panel-tabs button').forEach(b=>b.classList.toggle('active',b.dataset.v==='war'));
   refreshPanel();
@@ -2490,6 +2504,7 @@ function offerAccept(){
   if(pendingOffer.indep){
     countries[enemy].overlord=0;
     countries[enemy].subject=0;
+    invalidateCamps();            // 同上：阵营缓存要跟着失效
     pushLog(`🎌 ${countries[enemy].name} 重获独立！`,'gold');
   }
   const rels=(pendingOffer.releases||[]).filter(cid=>overlordOf(cid)===player);
@@ -2550,6 +2565,7 @@ function peaceIndep(enemy){
   if(cost>mine*0.95+0.01){ pushLog('战争分数不足（独立30分+割地/释放附庸费用）','war'); return; }
   countries[player].overlord=0;
   countries[player].subject=0;
+  invalidateCamps();                 // 阵营缓存必须失效，否则独立后还留在宗主阵营里
   pushLog(`🎌 ${countries[player].name} 赢得独立战争，脱离 ${countries[enemy].name} 自立！${checked.length?`并割让 ${checked.length} 个省份`:''}${rels.length?`，${rels.length} 个附庸同获自由`:''}`,'gold');
   makePeace(w,checked.map(pid=>({pid,to:player})),true,rels);
   labelsDirty=true;
@@ -2563,7 +2579,7 @@ function diploVassal(cid){
   if(!vassalReachable(player,cid)){ pushLog(`${t.name} 与我朝既不接壤亦非近海，无法册封`,'war'); return; }
   const cost=Math.round(60+totalDev(t)*2);
   if(me.gold<cost){ pushLog('国库不足，无法册封','war'); return; }
-  me.gold-=cost; t.overlord=player; t.subject=SUBJ_VASSAL;
+  me.gold-=cost; setOverlord(cid, player, SUBJ_VASSAL);
   clearAllAlliances(cid); // 附庸不得另有盟约
   truces[truceKey(player,cid)]=dayCount+3650;
   pushLog(`👑 ${t.name} 接受册封，岁贡三成，为我藩篱`,'gold');
@@ -2580,9 +2596,9 @@ function annexVassal(cid){
   // 被吞并国的附庸转奉我为宗主（继承其整个藩属体系），须在转移省份前处理，
   // 否则最后一省移走会触发 checkDeath 把附庸放独立
   const inherited=countries.filter(vc=>vc&&vc.alive&&vc.overlord===cid);
-  for(const vc of inherited) vc.overlord=player;   // 沿用各自原有国体
+  for(const vc of inherited) setOverlord(vc.id, player, vc.subject);   // 沿用各自原有国体
   for(const pid of [...t.provList]) transferProvince(pid,player);
-  t.overlord=0; t.subject=0;
+  setOverlord(cid, 0);
   pushLog(`👑 ${t.name} 王祚断绝，疆土尽入我朝`,'gold');
   for(const vc of inherited) pushLog(`👑 ${vc.name} 转奉我朝为主，为我藩属`,'gold');
   labelsDirty=true;
@@ -2593,7 +2609,7 @@ function releaseVassal(cid){
   if(MP.online) return mpCmd({c:'release',target:cid});
   const t=countries[cid];
   if(overlordOf(cid)!==player) return;
-  t.overlord=0; t.subject=0;
+  setOverlord(cid, 0);
   truces[truceKey(player,cid)]=dayCount+1825;
   pushLog(`${t.name} 重获独立，与我朝约定五年之好`,'');
   labelsDirty=true; refreshPanel();
@@ -2692,8 +2708,7 @@ function reviveNation(cid){
   let cap=bestComp[0], capLen=0;
   for(const pid of bestComp){ const L=provinces[pid].pix.length; if(L>capLen){capLen=L;cap=pid;} }
   t.alive=true;
-  t.overlord=player;
-  t.subject=SUBJ_VASSAL;      // 于故土复国 = 普通附庸国
+  setOverlord(cid, player, SUBJ_VASSAL);   // 于故土复国 = 普通附庸国
   t.gold=Math.max(t.gold||0,25);
   t.mp=Math.max(t.mp||0,3000);
   t.allies=[];

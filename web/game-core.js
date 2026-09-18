@@ -489,6 +489,12 @@ function canDemandProvince(pid,taker,enemy,takenSet){
   return false;
 }
 function directWar(a,b){ return wars.some(w=>w&&typeof w.a==='number'&&typeof w.d==='number'&&((w.a===a&&w.d===b)||(w.a===b&&w.d===a))); }
+/* 独立战争：a 是 b 的附庸，a 向自己的宗主 b 开战。
+   这种战争是规则的例外 —— **不受停战约束**。
+   停战是双方"不再互相进攻"的军事约定，不该被用来剥夺附庸争取独立的权利：
+   否则被打服的附庸（vassalize/makePeace 会立 10 年停战）会被整整锁死十年，
+   玩家点「宣战」还会静默失败、完全不知道发生了什么。 */
+function isIndepWar(a,b){ return !!b&&overlordOf(a)===b; }
 // 省份是否位于"前线"：与某国（或其附庸）已控制的省份相邻（用于蚕食推进排序）
 function isFrontProv(pid,me){
   for(const q of provinces[pid].nbrs){
@@ -776,9 +782,23 @@ function warScore(w){
   let aSet,dSet;
   if(overlordOf(w.a)===w.d){
     aSet=new Set([w.a]); dSet=new Set([w.d]);
-    for(const c of countries) if(c&&c.alive&&c.overlord){
-      if(aSet.has(c.overlord)) aSet.add(c.id);
-      else if(dSet.has(c.overlord)) dSet.add(c.id);
+    /* 造反者这一支（含它自己的附庸）单独一个集合 */
+    let more=true;
+    while(more){
+      more=false;
+      for(const c of countries) if(c&&c.alive&&c.overlord&&aSet.has(c.overlord)&&!aSet.has(c.id)){ aSet.add(c.id); more=true; }
+    }
+    /* 宗主这一侧。**必须排除造反者整支** ——
+       原来的写法是一个 for 循环配 else if，造反者本人（overlord 是宗主）
+       会被塞进 dSet，于是它既在 aSet 又在 dSet，
+       双方都拿它的省份记分，两边的分数一起顶到上限，
+       独立战争的分数就完全失真（打得再惨也"够分"独立）。 */
+    more=true;
+    while(more){
+      more=false;
+      for(const c of countries){
+        if(c&&c.alive&&c.overlord&&dSet.has(c.overlord)&&!dSet.has(c.id)&&!aSet.has(c.id)){ dSet.add(c.id); more=true; }
+      }
     }
   } else {
     aSet=campOf(w.a); dSet=campOf(w.d);
@@ -1071,8 +1091,10 @@ function aiMonthly(){
       s.add(i);
     }
   }
-  // 附庸独立战争：附庸国力（发展度）总和 ≥ 宗主国力 且 停战已过 → 举兵造反
+  // 附庸独立战争：附庸国力（发展度）总和 ≥ 宗主国力 → 举兵造反
   // （玩家作为附庸时自行宣战，不自动触发）
+  // 注意：停战在这里只是 AI 的"决策门槛"（AI 更保守），不是规则限制 ——
+  // 规则上 isIndepWar 的战争不受停战约束，玩家随时可以自己揭竿而起。
   for(const vc of countries){
     if(!vc||!vc.alive||!vc.overlord||isHuman(vc.id)) continue;
     if(truceBetween(vc.id,vc.overlord)) continue;
@@ -2150,7 +2172,7 @@ if(typeof module!=='undefined'&&module.exports){
     REBEL_BASE,rebelChanceOf,
     setCountryName,setCountryColor,sanitizeCountryName,RENAME_MAX,RENAME_COST,
     findPath,findNavalPath,bfsHome,bfsSetFrom,homeDistMap,countryStrength,
-    countriesAdjacent,seaAdjacent,vassalReachable,directWar,isFrontProv,attritionMonthly,
+    countriesAdjacent,seaAdjacent,vassalReachable,directWar,isIndepWar,isFrontProv,attritionMonthly,
     provinces:()=>provinces, countries:()=>countries, armies:()=>armies,
     wars:()=>wars, truces:()=>truces, humans:()=>humans,
   };

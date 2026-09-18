@@ -42,6 +42,7 @@ jobs:
           node tools/test-editor-unit.mjs
           node tools/test-maphall-unit.mjs
           node tools/test-wasteland-unit.mjs
+          node tools/test-indep-unit.mjs
 
       - name: 协议端到端（本地起服务 + 两个客户端）
         run: |
