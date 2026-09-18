@@ -50,3 +50,4 @@ jobs:
           node tools/test-puppet-mp.mjs
           node tools/test-ally-mp.mjs
           node tools/test-maps-api.mjs
+          node tools/test-navy-mp.mjs

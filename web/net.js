@@ -542,7 +542,10 @@ function mpApplyArmies(changed, removed) {
     a.navIdxSrv = ni; a.navIdx = ni; a.navAt = now;
 
     if (path !== null && path !== undefined) a.path = path;
-    if (navPath !== null && navPath !== undefined) a.navPath = navPath;
+    /* null = 本次增量没带这个字段（保持不变）；空数组 = 明确清空航路。
+       抵达目的地时服务端会发空数组，这里必须真的清掉，
+       否则客户端还拿着旧航路、而 navIdx 已被归零 → 舰队被画回出发点。 */
+    if (navPath !== null && navPath !== undefined) a.navPath = (navPath.length ? navPath : null);
     if (!a.isNavy) { a.navPath = null; a.dstProv = 0; }
     a._opt = undefined;      // 服务端已确认，撤掉乐观显示
   }

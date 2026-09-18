@@ -716,7 +716,11 @@ class Room {
           ar.push([a.id, a.owner, a.prov, str, prog]);
         } else {
           const pathOut = (forceFull || isNew || o.pathSig !== pathSig || forcedThis) ? (a.path || []).slice() : null;
-          const navOut = (forceFull || isNew || o.navRef !== navRef || forcedThis) ? (a.navPath || null) : null;
+          /* 海军航路用空数组表示"已清空"，**不能像以前那样用 null** ——
+             本行末尾的 null 是"这次增量没带这个字段、保持不变"的意思。
+             以前抵达时发 null，客户端以为没变化，旧航路一直留着；
+             而服务端又把 navIdx 归零，于是舰队被画在航路的第 0 个点 = 出发点。 */
+          const navOut = (forceFull || isNew || o.navRef !== navRef || forcedThis) ? (a.navPath || []).slice() : null;
           ar.push([a.id, a.owner, a.prov, str, prog, isNavy, navIdx, attrit, pathOut, navOut, dst]);
         }
       }
