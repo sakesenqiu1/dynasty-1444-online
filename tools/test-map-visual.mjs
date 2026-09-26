@@ -277,6 +277,58 @@ check('小比例尺下碎地块并入海面（与旁边海水颜色一致）', t
 check('中比例尺下碎地块并入海面（与旁边海水颜色一致）', tiny.medium.got === tiny.medium.sea, tiny.medium);
 check('大比例尺下碎地块照常画出来', tiny.big.got !== tiny.big.sea, tiny.big);
 
+/* ---- 城防模型：有城防的省画要塞而不是城镇，等级越高越大 ---- */
+const forts = await p.eval(`
+  ${VIEW}
+  // 给几个省摆上城防，再看看地图上是不是换了模型
+  const picks=[];
+  for(let i=1;i<provinces.length&&picks.length<6;i++){
+    const q=provinces[i];
+    if(q&&q.pix.length&&q.owner&&q.owner===q.controller) picks.push(i);
+  }
+  if(picks.length<6) return null;
+  const setLv=(pid,lv)=>{ provinces[pid].fort=lv; };
+  // 分别摆 Lv1 / Lv3 / Lv5
+  setLv(picks[0],1); setLv(picks[1],3); setLv(picks[2],5);
+  provinces[picks[3]].barracks=1;
+  _bldEpoch++; _frameKey='';
+  // 1) sprite 尺寸随等级增大（Lv0 = 没有城防，不画）
+  const sizes=[1,2,3,4,5].map(lv=>{ const s=fortSprite(lv,false); return [lv,s._w,s._h]; });
+  // 2) 有城防 -> 画要塞；拆掉 -> 换回城镇。用金色徽记像素数区分
+  const p0=provinces[picks[0]];
+  const goldAt=(z,x,y)=>{ __view(z,x,y); _frameKey=''; render(performance.now());
+    const W=mapCv.width,H=mapCv.height,d=ctx.getImageData(0,0,W,H).data;
+    // 统计金色徽记像素（等级圈的 #f0cd72）
+    let gold=0;
+    for(let i=0;i<d.length;i+=4) if(Math.abs(d[i]-240)<24&&Math.abs(d[i+1]-205)<26&&Math.abs(d[i+2]-114)<34) gold++;
+    return gold; };
+  const withFort=goldAt(6.2,p0.cx,p0.cy);
+  provinces[picks[0]].fort=0; _bldEpoch++;
+  const withoutFort=goldAt(6.2,p0.cx,p0.cy);
+  provinces[picks[0]].fort=1; _bldEpoch++;
+  return { picks, sizes, withFort, withoutFort, cap:p0.name };
+`);
+if (!forts) {
+  console.log('  SKIP  没找到可以摆城防的省');
+} else {
+  console.log('要塞 sprite 尺寸：' + forts.sizes.map(s => `Lv${s[0]}:${s[1]}×${s[2]}`).join(' '));
+  check('城防 sprite 随等级变大',
+    forts.sizes.every((s, i) => i === 0 || s[1] > forts.sizes[i - 1][1]),
+    forts.sizes);
+  check('有城防的省份多出金色等级徽记（换成要塞模型）', forts.withFort > forts.withoutFort,
+    [forts.withFort, forts.withoutFort]);
+  const fortCount = await p.eval(`
+    ${VIEW}
+    __view(2.4, 742-MAP_SHIFT, 196);
+    // 中比例尺就能看到城防（军情要紧），但看不到普通城镇
+    let f=0; for(let i=1;i<provinces.length;i++){ const q=provinces[i]; if(q&&q.pix.length&&(q.fort|0)>0) f++; }
+    return { fortsInWorld:f, fortsDrawn:_fortCount, townsDrawn:_townCount-_fortCount };
+  `);
+  console.log(`  中比例尺：世界里 ${fortCount.fortsInWorld} 座城防，画了 ${fortCount.fortsDrawn} 座，普通城镇 ${fortCount.townsDrawn} 个`);
+  check('中比例尺也能看到城防', fortCount.fortsDrawn > 0, fortCount.fortsDrawn);
+  check('中比例尺不画普通城镇', fortCount.townsDrawn === 0, fortCount.townsDrawn);
+}
+
 /* ---- 1~2 像素的碎岛已经在世界生成阶段被取消 ---- */
 const pruned = await p.eval(`
   let min=1e9, n2=0, alive=0;
@@ -350,7 +402,11 @@ const wrap = await p.eval(`
     for(let y=2;y<H;y+=23) for(let x=2;x<W;x+=17){ const o=(y*W+x)*4; s=(Math.imul(s,31)+d[o]+d[o+1]*3+d[o+2]*7)|0; }
     return s;
   };
-  const sigAt=(x,y,z)=>{ __view(z,x,y); _frameKey=''; render(performance.now()); return __sig(); };
+  const sigAt=(x,y,z)=>{
+    // 自适应分辨率会在后台悄悄改 dpr，量出来的像素自然对不上；先钉死
+    if(renderScale!==1){ renderScale=1; applyRenderScale(); }
+    __view(z,x,y); _frameKey=''; render(performance.now()); return __sig();
+  };
   const W=COLS;
   const a=sigAt(400,200,2.0), b=sigAt(400+W,200,2.0), c=sigAt(400+W*3,200,2.0);
   const d=sigAt(0,180,1.9),    e=sigAt(W,180,1.9);
@@ -410,9 +466,9 @@ check('同国各省因地形产生色差 (σ=' + variance.sd + ')', variance.sd 
 const towns = await p.eval(`
   ${VIEW}
   const out={};
-  out.world = (__view(0.9,720,320), _townCount);
-  out.mid   = (__view(2.4,742,196), _townCount);
-  out.mid2  = (__view(3.0,748,190), _townCount);
+  out.world = (__view(0.9,720,320), _townCount-_fortCount);
+  out.mid   = (__view(2.4,742,196), _townCount-_fortCount);
+  out.mid2  = (__view(3.0,748,190), _townCount-_fortCount);
   // 视野里的省份数会随放大而变少，所以要看「有图标省份 / 视野内省份」这个比例
   out.at = (z)=>{ __view(z,1082,300);
     const [wx0,wy0]=s2w(0,0), [wx1,wy1]=s2w(cw,ch);
@@ -423,9 +479,9 @@ const towns = await p.eval(`
       if(c+0.5<wx0||c+0.5>wx1||r+0.5<wy0||r+0.5>wy1) continue;
       vis++;
     }
-    return { towns:_townCount, vis, frac:Math.round(_townCount/Math.max(1,vis)*1000)/1000 };
+    return { towns:_townCount-_fortCount, forts:_fortCount, vis, frac:Math.round((_townCount-_fortCount)/Math.max(1,vis)*1000)/1000 };
   };
-  out.big   = out.at(4.0);      // 印度：陆地密集区，密度压力最大
+  out.big   = (r=>({towns:r.towns-r.forts,vis:r.vis,frac:r.frac}))(out.at(4.0));
   out.big2  = out.at(6.5);
   out.huge  = out.at(14);
   out.hasTable=provinces.some(p=>p&&p._tpx>=0);
@@ -533,7 +589,37 @@ for (const [name, code] of shots) {
   log('截图 ' + await p.shot(name));
 }
 
-/* 带界面的整屏截图 */
+/* ---- 城防 + 国名 对照截图 ---- */
+await p.eval(`
+  // 在一个国家里摆几座不同等级的城防，然后把镜头对准它
+  const A=countries.filter(x=>x&&x.alive&&x.provList.length>8)
+    .sort((a,b)=>b.provList.length-a.provList.length)[0];
+  const list=A.provList.filter(pid=>provinces[pid].pix.length);
+  [1,2,3,4,5].forEach((lv,i)=>{ if(list[i*2]) provinces[list[i*2]].fort=lv; });
+  if(list[1]) provinces[list[1]].barracks=1;
+  const mid=provinces[list[Math.floor(list.length/2)]];
+  window.__fortView={x:mid.cx, y:mid.cy, name:A.name};
+  _bldEpoch++; _frameKey='';
+  return true;
+`);
+const fv = await p.eval("return window.__fortView;");
+console.log(`城防对照截图对准：${fv.name}`);
+for (const [name, code] of [
+  ['12-forts', `cam.z=7; cam.x=${fv.x}; cam.y=${fv.y};`],
+  ['13-forts-wide', `cam.z=2.6; cam.x=${fv.x}; cam.y=${fv.y};`],
+]) {
+  await p.eval(`
+    document.getElementById('sidepanel').style.display='none';
+    document.getElementById('modebar').style.display='none';
+    ${code}
+    _frameKey=''; render(performance.now());
+    return true;
+  `);
+  await sleep(450);
+  log('截图 ' + await p.shot(name));
+}
+
+/* ---- 带界面的整屏截图 ---- */
 await p.eval(`
   document.getElementById('sidepanel').style.display='';
   document.getElementById('modebar').style.display='';
@@ -551,19 +637,25 @@ await p.eval(`
     cv.style.cssText='position:fixed;left:0;top:0;z-index:9999;background:#2f4a2c';
     document.body.appendChild(cv);
   }
-  const M=5, PAD=10, label=['村镇','城镇','城市','大城'];
+  const M=4, PAD=12, label=['村镇','城镇','城市','大城'];
   const cells=[];
-  for(let t=0;t<4;t++) for(const cap of [false,true]) cells.push([t,cap]);
-  const cw=TOWN_BOX[3]*M+PAD*2, chh=(TOWN_BOX[3]+5)*M+PAD*2+16;
-  cv.width=cw*cells.length; cv.height=chh;
+  for(let t=0;t<4;t++) for(const cap of [false,true]) cells.push(['town',t,cap]);
+  for(let lv=1;lv<=5;lv++) cells.push(['fort',lv,false]);
+  cells.push(['fort',3,true]);
+  const COLS_N=5, ROWS_N=Math.ceil(cells.length/COLS_N);
+  const cw=Math.round(1250/COLS_N), chh=150;
+  cv.width=cw*COLS_N; cv.height=chh*ROWS_N;
   const g=cv.getContext('2d');
   g.fillStyle='#2f4a2c'; g.fillRect(0,0,cv.width,cv.height);
-  cells.forEach(([t,cap],i)=>{
-    const s=townSprite(t,cap);
+  cells.forEach((cell,i)=>{
+    const [kind,a,cap]=cell;
+    const s=kind==='town'?townSprite(a,cap):fortSprite(a,cap);
     const w=s.width/TOWN_SS*M, h=s.height/TOWN_SS*M;
-    g.drawImage(s,(i+0.5)*cw-w/2,(chh-h)/2-6,w,h);
-    g.fillStyle='#f0e6cf'; g.font='13px sans-serif'; g.textAlign='center';
-    g.fillText(label[t]+(cap?'·国都':''),(i+0.5)*cw,chh-8);
+    const cx=(i%COLS_N+0.5)*cw, cy=(Math.floor(i/COLS_N)+0.5)*chh;
+    g.drawImage(s,cx-w/2,cy-h/2-8,w,h);
+    g.fillStyle='#f0e6cf'; g.font='14px sans-serif'; g.textAlign='center';
+    const nm=kind==='town'?(label[a]+(cap?'·国都':'')):('城防 Lv'+a+(cap?'·国都':''));
+    g.fillText(nm,cx,cy+chh/2-12);
   });
   return true;
 `);

@@ -427,6 +427,21 @@ function mpDelta(m) {
       p.tax = row[1]; p.prod = row[2]; p.man = row[3];
     }
   }
+  if (d.bl) {
+    // 建筑：兵营 0/1、城防等级。城防要重画地图模型，所以顺带把本省重绘一遍
+    for (const row of d.bl) {
+      const p = provinces[row[0]];
+      if (!p) continue;
+      const oldFort = p.fort || 0;
+      p.barracks = row[1] ? 1 : 0;
+      p.fort = row[2] || 0;
+      if (p.fort !== oldFort) {
+        if (typeof _bldEpoch !== 'undefined') _bldEpoch++;
+        if (typeof recolorProvAndNbrs === 'function') recolorProvAndNbrs(p.id);
+      }
+    }
+    if (typeof markPanelDirty === 'function') markPanelDirty();
+  }
   if (d.rcAdd || d.rcDel) {
     // 差量更新：新增 [id,owner,prov,str,isNavy,startDay,totalDays]，以及被移除的 id
     if (d.rcDel) {

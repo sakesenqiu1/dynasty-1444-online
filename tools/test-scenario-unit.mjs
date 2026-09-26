@@ -332,7 +332,6 @@ const t8c = A.run(`
   const afterKeep=scenarioBaseReady();
   const sc2=makeScenario({name:'再导出'});
   const keptName=(sc2.countries['44']||{}).n;
-  // 不带 keepBase 时基线应作废
   applyScenario(sc,false);
   const afterDrop=scenarioBaseReady();
   return { before, err, afterKeep, afterDrop, keptName };
@@ -340,7 +339,24 @@ const t8c = A.run(`
 check('采基线后 scenarioBaseReady 为真', t8c.before === true, t8c);
 check('【核心】applyScenario(...,true) 保留基线', t8c.afterKeep === true, t8c);
 check('【核心】保留基线下再导出，改动仍在', t8c.keptName === '改名了', t8c);
-check('applyScenario(...,false) 会作废基线（原行为不变）', t8c.afterDrop === false, t8c);
+/* 基线现在的语义是「默认世界的快照」，在 worldMakeCountries 里就采好了，
+   不再由 applyScenario 清空 —— 以前清空之后 makeScenario 会懒采一个「已经改过的世界」，
+   diff 变成空的，导入一张地图再导出就等于把地图弄丢了。 */
+check('applyScenario(...,false) 之后基线仍可用（基线永远是默认世界的快照）',
+  t8c.afterDrop === true, t8c);
+
+const t8c2 = A.run(`
+  // 直接载入一张地图、什么都不编辑就再导出：改动不能丢
+  resetWorld(); setSeed(SCENARIO_SEED); buildWorld();
+  const sc={ v:1, base:'ne110m', seed:SCENARIO_SEED, name:'再导出测试',
+             countries:{ '44':{ n:'改名了' } }, provinces:{ '7':{ o:44, t:9 } }, armies:[] };
+  applyScenario(sc,false);
+  const back=makeScenario({name:'再导出'});
+  return { name:(back.countries['44']||{}).n, provTax:(back.provinces['7']||{}).t,
+           nCountry:Object.keys(back.countries).length, nProv:Object.keys(back.provinces).length };
+`);
+check('【核心】载入地图后立刻再导出，国家改动没丢', t8c2.name === '改名了', t8c2);
+check('【核心】载入地图后立刻再导出，省份改动没丢', t8c2.provTax === 9, t8c2);
 
 const t8d = A.run(`
   // 老地图：完全没有 wars / ov / sj / al 字段

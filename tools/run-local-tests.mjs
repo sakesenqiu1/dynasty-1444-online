@@ -22,15 +22,22 @@ const SLOW = {
   'test-jitter.mjs': 300000, 'test-memory.mjs': 300000, 'test-load-long.mjs': 300000,
 };
 const only = process.argv.slice(2);
-/* 先跑「量线上服务器帧耗时」的那个：它读的是服务端累积的 tickMax，
-   别的用例每开一局都会在服务器上留下一个房间（房间要闲置几分钟才回收），
-   等一堆房间同时跑月度结算，tickMax 必然被抬上去，那条断言就假失败了。
-   所以它必须趁服务器还干净的时候先跑。 */
-const FIRST = ['test-jitter.mjs'];
+/* 先跑「量线上服务器」的那两个：它们读的是服务端累积的 tickMax / 房间数，
+   别的用例每开一局都会在服务器上留下一个房间（闲置 5 分钟才回收），
+   等一堆房间同时跑月度结算，这两条就必然假失败。
+   所以它们要趁服务器还干净的时候先跑；重度压测放到最后。 */
+const FIRST = ['test-jitter.mjs', 'test-load.mjs'];
+const LAST = ['test-load-long.mjs', 'test-memory.mjs'];
+const rank = (f) => {
+  const a = FIRST.indexOf(f), b = LAST.indexOf(f);
+  if (a >= 0) return a;                       // 0,1
+  if (b >= 0) return 900 + b;                 // 最后
+  return 100;
+};
 const files = readdirSync(tools)
   .filter(f => /^test-.*\.mjs$/.test(f) && !SKIP.has(f))
   .filter(f => !only.length || only.some(o => f.includes(o)))
-  .sort((a, b) => (FIRST.indexOf(a) + 1 || 999) - (FIRST.indexOf(b) + 1 || 999) || a.localeCompare(b));
+  .sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
 
 let totalPass = 0, totalFail = 0, skipped = 0;
 const bad = [];

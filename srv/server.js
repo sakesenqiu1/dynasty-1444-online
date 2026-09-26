@@ -258,8 +258,11 @@ class Room {
           if (!np) throw new Error(p2.coastPix.length ? '无法找到通往该省的海路' : '目标省没有海岸线，无法派遣舰队');
           a.navPath = np; a.navIdx = 0; a.dstProv = pid; a.path = []; a.prog = 0;
         } else {
-          const pathArr = core.findPath(a.prov, pid);
-          if (!pathArr) throw new Error('无法找到通往该省的陆路');
+          const pathArr = core.findPath(a.prov, pid, a.owner);
+          // 拿不到路时再算一遍「不管城防」的版本，好区分是城防挡的还是真没路
+          if (!pathArr) throw new Error(core.findPath(a.prov, pid, 0)
+            ? '打不通：路上有敌方城防，必须先把它攻下来（城防外圈禁止敌军横穿）'
+            : '无法找到通往该省的陆路');
           a.path = pathArr; a.prog = 0;
         }
         if (!this.forceArmy) this.forceArmy = new Set();
@@ -303,6 +306,12 @@ class Room {
         c.gold -= 25; c.mp -= 5000;
         core.addRecruit(me, prov.id, 5000, false);
         core.pushLog(`${prov.name} 开始征兵，约 ${Math.round(core.RECRUIT_DAYS / 30)} 个月后成军`, 'gold', me);
+        break;
+      }
+      case 'build': {
+        const pid = +m.prov;
+        const err = core.buildBuilding(me, pid, String(m.kind || ''));
+        if (err) throw new Error(err);
         break;
       }
       case 'navy': {
@@ -653,13 +662,13 @@ class Room {
        在 8 次/秒 × 多房间下那是每秒几万个垃圾对象，
        GC 停顿会直接表现为玩家感觉到的"卡一下"，内存也会一路涨。 */
     const base = this.baseline || (this.baseline = {
-      prov: new Map(), dev: new Map(), ct: new Map(), army: new Map(), warsSig: null, truceSig: null,
+      prov: new Map(), dev: new Map(), bld: new Map(), ct: new Map(), army: new Map(), warsSig: null, truceSig: null,
       countryMeta: null,
     });
-    const prov = base.prov, dev = base.dev, ct = base.ct, army = base.army;
+    const prov = base.prov, dev = base.dev, bld = base.bld, ct = base.ct, army = base.army;
     const forced = this.forceArmy;
     this.forceArmy = null;
-    const pr = [], devOut = [], ctOut = [], ar = [], ax = [];
+    const pr = [], devOut = [], ctOut = [], ar = [], ax = [], bldOut = [];
 
     for (let i = 1; i < st.provinces.length; i++) {
       const p = st.provinces[i];
@@ -673,6 +682,9 @@ class Room {
       }
       const dk = p.tax + p.prod * 1000 + p.man * 1e6;
       if (dev.get(i) !== dk) { dev.set(i, dk); devOut.push([i, p.tax, p.prod, p.man]); }
+      // 建筑：兵营 0/1、城防 0..MAX。变一个字节就推一行，和开发度同一套指纹法
+      const bk = (p.barracks ? 1 : 0) + (p.fort || 0) * 16;
+      if (bld.get(i) !== bk) { bld.set(i, bk); bldOut.push([i, p.barracks ? 1 : 0, p.fort || 0]); }
     }
 
     for (let i = 1; i < st.countries.length; i++) {
@@ -775,6 +787,7 @@ class Room {
     };
     if (pr.length) delta.pr = pr;
     if (devOut.length) delta.dev = devOut;
+    if (bldOut.length) delta.bl = bldOut;
     if (ctOut.length) delta.ct = ctOut;
     if (ar.length || ax.length) { delta.aw = 1; if (ar.length) delta.ar = ar; if (ax.length) delta.ax = ax; }
     // 已递交、等待回应的和约提案：过期或战争结束就撤掉

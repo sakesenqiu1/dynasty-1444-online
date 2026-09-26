@@ -18,6 +18,33 @@ function spAt(r){
 }
 const HOP=12;                                 // 行军一省天数
 const SIEGE_DIV=3000;                         // 围城速率除数
+
+/* ---------- 城市建筑 ----------
+   兵营：驻扎在本省的军队维护费减半。
+   城防：等级就是驻军规模（每级 1000 人），并且向外一圈投射控制区。
+   数值都集中在这里，方便调平衡。 */
+const FORT_MAX=5;                             // 城防最高等级
+const FORT_GARRISON=1000;                     // 每级驻军人数
+const FORT_DAMP=1.2;                          // 城防对围城速度的压制系数
+const FORT_LUCK=0.45;                         // 围城每日运气幅度（±45%）
+const FORT_MIN_DAMP=0.05;                     // 压制下限：再弱的攻方也总能慢慢磨
+const BARRACKS_COST=150;
+const BARRACKS_UPKEEP_MUL=0.5;                // 兵营里驻扎军队的维护费倍率
+const FORT_COST=[0,200,280,380,500,650];      // 升到第 n 级的花费
+const BUILD_NAMES={barracks:'兵营',fort:'城防'};
+
+function ensureProvinceBuildings(p){
+  if(!p) return p;
+  if(typeof p.fort!=='number'||!isFinite(p.fort)||p.fort<0) p.fort=0;
+  if(typeof p.barracks!=='number'||!isFinite(p.barracks)) p.barracks=0;
+  return p;
+}
+function garrisonOf(p){ return p&&p.fort>0?p.fort*FORT_GARRISON:0; }
+function buildCost(p,kind){
+  if(kind==='barracks') return p.barracks?0:BARRACKS_COST;
+  if(kind==='fort') return p.fort>=FORT_MAX?0:(FORT_COST[p.fort+1]||0);
+  return 0;
+}
 const RECRUIT_DAYS=365;                       // 陆军集结周期（1 年）
 const NAVY_DAYS=270;                          // 舰队组建周期（9 个月）
 const SEA='#2a4260';
@@ -232,7 +259,7 @@ function buildProvinces(cidMap,feats){
   const np=pid;
   // 3) 归集像素、邻接、边界、质心、归属多数票
   provinces=[null];
-  for(let i=1;i<=np;i++) provinces.push({id:i,pix:[],nbrs:new Set(),borderPix:new Map(),coastPix:[],cx:0,cy:0});
+  for(let i=1;i<=np;i++) provinces.push({id:i,pix:[],nbrs:new Set(),borderPix:new Map(),coastPix:[],cx:0,cy:0,fort:0,barracks:0});
   const ownerTally=new Int32Array((np+1)*180); // 国家数<180
   for(let i=0;i<NPIX;i++){
     const p=provOf[i]; if(!p) continue;
@@ -378,29 +405,93 @@ function recomputeCap(c){
   c.mpCap=mp; c.forceLimit=fl;
 }
 function totalDev(c){ let d=0; for(const pid of c.provList){ const p=provinces[pid]; d+=p.tax+p.prod+p.man; } return d; }
+/* ---------- 国名标签 ----------
+   按「陆路连通块」分块：本土一块，每一块飞地各算一块 —— 飞地上也会显示国名。
+   每块的字号按自己的面积来（国土大国名大、飞地小国名小），
+   块越大给的标签份数越多，在一张粗网格上均匀撒点，
+   国名就铺满整片国土，而不是全挤在一个质心上。
+   撒点用预分配的定长网格数组，不建 Map，免得每次重算都产生垃圾。 */
+const LBL_CELL=26;
+const LBL_GW=Math.ceil(COLS/LBL_CELL), LBL_GH=Math.ceil(ROWS/LBL_CELL);
+const LBL_SEP=95;                     // 同名标签之间的最小间距
+const _lblN=new Int32Array(LBL_GW*LBL_GH);
+const _lblX=new Float64Array(LBL_GW*LBL_GH);
+const _lblY=new Float64Array(LBL_GW*LBL_GH);
+/* 字号：面积开方乘个斜率 —— 面积差 100 倍，字号才差 10 倍，看着才自然 */
+function labelFontOf(area){ return Math.max(9,Math.min(26,Math.sqrt(area)*0.30+7)); }
+/* 各比例尺下最低显示到多大的国土（越小越晚出现） */
+function labelMinArea(z){
+  if(z<1.2) return 4000;
+  if(z<2.0) return 1800;
+  if(z<3.0) return 700;
+  if(z<4.6) return 260;
+  return 0;
+}
 function rebuildLabels(){
   for(let c=1;c<countries.length;c++){
-    const cc=countries[c]; if(!cc||!cc.alive){cc&&(cc.lx=0,cc.ly=0); continue;}
-    // 1) 算国家总像素，筛掉 < 0.5% 的极小省份（孤岛），避免质心被拉偏
-    let totalPix=0;
-    for(const pid of cc.provList){ const p=provinces[pid]; if(p) totalPix+=p.pix.length; }
-    const minPix=Math.max(8, totalPix*0.005);
-    // 2) 用筛后省份的像素列号/行号求加权质心（按像素直接加权，不按省份面积）
-    let sx=0,sy=0,sn=0;
+    const cc=countries[c];
+    if(!cc||!cc.alive){ if(cc){ cc.lx=0; cc.ly=0; cc.labels=[]; } continue; }
+    // 1) 按邻接把国土切成连通块（只走同属本国的省）
+    const seen=new Set(), comps=[];
     for(const pid of cc.provList){
-      const p=provinces[pid]; if(!p||p.pix.length<minPix) continue;
-      for(const px of p.pix){
-        const r=(px/COLS)|0, col=px%COLS;
-        sx+=col+0.5; sy+=r+0.5; sn++;
+      if(seen.has(pid)) continue;
+      const p0=provinces[pid]; if(!p0||!p0.pix.length) continue;
+      seen.add(pid);
+      const stack=[pid], comp=[];
+      while(stack.length){
+        const u=stack.pop(); comp.push(u);
+        const q=provinces[u]; if(!q) continue;
+        for(const v of q.nbrs){
+          if(seen.has(v)) continue;
+          const pv=provinces[v];
+          if(!pv||!pv.pix.length||pv.owner!==cc.id) continue;
+          seen.add(v); stack.push(v);
+        }
       }
+      comps.push(comp);
     }
-    if(sn>0){ cc.lx=sx/sn; cc.ly=sy/sn; }
-    else {
-      // 兜底：全是小省份就用所有省份质心
-      let fx=0,fy=0,fn=0;
-      for(const pid of cc.provList){ const p=provinces[pid]; if(!p) continue; fx+=p.cx; fy+=p.cy; fn++; }
-      if(fn>0){cc.lx=fx/fn; cc.ly=fy/fn;}
+    // 2) 每块一次像素遍历：累计面积，并丢进粗网格
+    cc.labels=[]; cc.labelPx=0;
+    let bestArea=-1, bx=0, by=0;
+    for(let ci=0;ci<comps.length;ci++){
+      const comp=comps[ci];
+      let area=0, touched=null;
+      for(const pid of comp){
+        const p=provinces[pid];
+        for(const px of p.pix){
+          const r=(px/COLS)|0, col=px%COLS;
+          const gi=((r/LBL_CELL)|0)*LBL_GW+((col/LBL_CELL)|0);
+          if(_lblN[gi]===0){ if(!touched) touched=[]; touched.push(gi); }
+          _lblN[gi]++; _lblX[gi]+=col+0.5; _lblY[gi]+=r+0.5;
+          area++;
+        }
+      }
+      if(!area){ if(touched) for(const gi of touched) _lblN[gi]=0; continue; }
+      cc.labelPx+=area;
+      // 3) 撒点：格内像素多的优先，彼此至少隔开 LBL_SEP
+      const cand=[];
+      for(const gi of touched) cand.push(gi);
+      cand.sort((a,b)=>_lblN[b]-_lblN[a]);
+      const want=Math.max(1,Math.min(8,Math.round(Math.sqrt(area)/55)));
+      const picked=[];
+      for(const gi of cand){
+        if(picked.length>=want) break;
+        const x=_lblX[gi]/_lblN[gi], y=_lblY[gi]/_lblN[gi];
+        let ok=true;
+        for(const q of picked) if(Math.hypot(q[0]-x,q[1]-y)<LBL_SEP){ ok=false; break; }
+        if(ok) picked.push([x,y]);
+      }
+      for(const [x,y] of picked) cc.labels.push([x,y,area,labelFontOf(area),ci]);
+      if(area>bestArea){ bestArea=area; bx=0; by=0; let n=0;
+        for(const gi of touched){ bx+=_lblX[gi]; by+=_lblY[gi]; n+=_lblN[gi]; }
+        if(n){ bx/=n; by/=n; } }
+      for(const gi of touched) { _lblN[gi]=0; _lblX[gi]=0; _lblY[gi]=0; }
     }
+    // 大的块排前面：小比例尺下只取第一个，取到的就是本土那块最大的标签
+    cc.labels.sort((a,b)=>b[2]-a[2]);
+    // 4) lx/ly 保留成「最大那块的中心」，别处（相机、军团落点）还在用
+    if(bestArea>=0){ cc.lx=bx; cc.ly=by; }
+    else if(!cc.lx){ cc.lx=0; cc.ly=0; }
   }
   labelsDirty=false;
 }
@@ -432,6 +523,7 @@ function ensureCountryFields(c){
   if(typeof c.ruler!=='string') c.ruler='';
   if(typeof c.lx!=='number') c.lx=0;
   if(typeof c.ly!=='number') c.ly=0;
+  if(!Array.isArray(c.labels)) c.labels=[];
   return c;
 }
 function ensureAllCountryFields(){
@@ -617,14 +709,61 @@ function inWar(c){
 }
 function truceKey(a,b){ return a<b? a+'|'+b : b+'|'+a; }
 function truceBetween(a,b){ const t=truces[truceKey(a,b)]; return t&&t>dayCount; }
-function findPath(from,to){
+/* ---------- 城防控制区（ZOC） ----------
+   一座完好的要塞把「自己外圈那一圈省」变成控制区：敌军不许在同一座要塞的
+   外圈里横着穿过去 —— 想绕过这座要塞，就得先把它打下来。
+
+   为什么不会出现「进不去外圈所以打不到要塞」：
+   规则只禁止「外圈 → 同一座要塞的外圈」这一种移动，
+   从外面踏进外圈是允许的，而外圈任意一格都与要塞本身相邻，
+   所以任何一支敌军都至少有一条「外面 → 外圈 → 要塞」的路。
+   要塞那一格永远可进（to===f 直接放行），这就是攻城入口。
+   攻下之后 controller 变了，控制区跟着易主，原来的主人反而被挡住。 */
+
+/* 给某个行军方算出「哪些省被谁控制着」：只有和自己交战、且完好的要塞才算。
+   要塞数量很少，所以这张表很便宜；一次寻路建一次，不要放进 BFS 内层。 */
+function zocMapFor(mover){
+  const m=new Map();                        // 省id -> [要塞省id,...]
+  if(!mover) return m;
+  for(let i=1;i<provinces.length;i++){
+    const f=provinces[i];
+    if(!f||!f.fort||!f.pix.length) continue;
+    const holder=f.controller;
+    if(!holder||holder===mover) continue;
+    if(!atWar(mover,holder)) continue;
+    const nb=f.nbrs;
+    for(let k=0;k<nb.length;k++){
+      const n=nb[k];
+      let a=m.get(n); if(!a){ a=[]; m.set(n,a); }
+      a.push(i);
+    }
+  }
+  return m;
+}
+/* 从 from 走到 to 允不允许（只看城防控制区这一条） */
+function zocAllows(zoc,from,to){
+  if(!zoc||!zoc.size) return true;
+  const A=zoc.get(from);
+  if(!A) return true;                       // 起点不在任何控制区里 -> 随便进
+  const B=zoc.get(to);
+  if(!B) return true;                       // 目标是控制区外 -> 放行（含退出去）
+  for(let i=0;i<A.length;i++){
+    const f=A[i];
+    if(f===to) return true;                 // 走到要塞本身 -> 永远是攻城入口
+    if(B.indexOf(f)>=0) return false;       // 同一座要塞的外圈内部穿行 -> 挡住
+  }
+  return true;
+}
+
+function findPath(from,to,mover){
   if(from===to) return [];
+  const zoc=zocMapFor(mover);
   const prev=new Int32Array(provinces.length).fill(-1); prev[from]=from;
   const q=[from]; let h=0;
   while(h<q.length){
     const u=q[h++];
     for(const v of provinces[u].nbrs){
-      if(prev[v]===-1){
+      if(prev[v]===-1&&zocAllows(zoc,u,v)){
         prev[v]=u;
         if(v===to){ const path=[]; let x=to; while(x!==from){path.push(x);x=prev[x];} return path.reverse(); }
         q.push(v);
@@ -1034,6 +1173,20 @@ function resolveBattles(){
   }
 }
 
+/* ---------- 围城 ----------
+   每日进度 = 攻方兵力 / SIEGE_DIV × 城防压制 × 运气
+
+   城防压制 = 攻方兵力 / (攻方兵力 + 驻军 × FORT_DAMP)
+     · 没有城防时恒等于 1，和以前完全一样
+     · 攻方越薄、城防越高，压制越狠：2000 人围 3 级城防只有 0.36 的效率
+     · 有下限 FORT_MIN_DAMP，人再少也能慢慢磨，不会永远打不动
+   运气 = 1 ± FORT_LUCK，每天摇一次 —— 围城本来就该有点偶然性。 */
+function siegeDailyProgress(bstr,p){
+  const gar=garrisonOf(p);
+  const damp=gar>0?Math.max(FORT_MIN_DAMP, bstr/(bstr+gar*FORT_DAMP)):1;
+  const luck=1+FORT_LUCK*(rnd()*2-1);
+  return (bstr/SIEGE_DIV)*damp*luck;
+}
 function resolveSieges(){
   const byProv=new Map();
   for(const a of armies){ let l=byProv.get(a.prov); if(!l){l=[];byProv.set(a.prov,l);} l.push(a); }
@@ -1043,13 +1196,15 @@ function resolveSieges(){
     let bstr=0,bowner=0;
     for(const a of list) if(atWar(a.owner,p.controller)){ bstr+=a.str; if(!bowner)bowner=a.owner; }
     if(bstr>0){
-      p.siege+=bstr/SIEGE_DIV;
+      p.siege+=siegeDailyProgress(bstr,p);
       if(p.siege>=100){
         p.siege=0;
         const old=p.controller;
         p.controller=bowner;
+        // 城防跟着省一起易主：原来的控制区消失，攻方接手后反过来挡原主
         UI.recolorNbrs(pid);
-        pushLogWorld(`${countries[bowner].name} 攻占了 ${p.name}（原属 ${countries[old].name}）`,'war',[old,bowner],
+        const fortTxt=p.fort?`（城防 Lv.${p.fort} 被攻破）`:'';
+        pushLogWorld(`${countries[bowner].name} 攻占了 ${p.name}${fortTxt}（原属 ${countries[old].name}）`,'war',[old,bowner],
                      countries[bowner].provList.length>4||countries[old].provList.length>4);
       }
     } else if(p.siege>0){
@@ -1091,7 +1246,13 @@ function economy(c){
   let inc=0;
   for(const pid of c.provList){ const p=provinces[pid]; if(p.controller===p.owner) inc+=(p.tax+p.prod)*0.05; }
   let up=0;
-  for(const a of armies) if(a.owner===c.id) up+=a.str/1000*0.15;
+  for(const a of armies){
+    if(a.owner!==c.id) continue;
+    // 兵营：驻扎在自己掌控的兵营省里，维护费减半
+    const p=provinces[a.prov];
+    const cheap=p&&p.barracks&&p.controller===c.id;
+    up+=a.str/1000*0.15*(cheap?BARRACKS_UPKEEP_MUL:1);
+  }
   c.income=inc-up;
   c.gold+=inc-up;
   // 附庸朝贡：省份毛收入的30%上缴宗主（不受军队维护费影响）
@@ -1111,6 +1272,33 @@ function economy(c){
 }
 
 function countryStrength(cid){ let s=0; for(const a of armies) if(a.owner===cid) s+=a.str; return s; }
+
+/* ---------- 建造 ----------
+   返回 null 表示成功，否则返回一句给玩家看的原因。 */
+function buildBuilding(cid,pid,kind){
+  const c=countries[cid];
+  if(!c||!c.alive) return '国家不存在';
+  const p=provinces[pid];
+  if(!p||!p.pix.length) return '没有这个省份';
+  if(p.owner!==cid) return '只能在自己的领土上建造';
+  if(p.controller!==cid) return '本省不在你控制之下';
+  if(kind!=='barracks'&&kind!=='fort') return '未知的建筑';
+  if(kind==='barracks'&&p.barracks) return '本省已有兵营';
+  if(kind==='fort'&&p.fort>=FORT_MAX) return `城防已达最高等级 Lv.${FORT_MAX}`;
+  const cost=buildCost(p,kind);
+  if(cost<=0) return '这里不能再建了';
+  if(c.gold<cost) return `金币不足（需要 ${cost}）`;
+  c.gold-=cost;
+  if(kind==='barracks') p.barracks=1;
+  else {
+    p.fort++;
+    UI.recolorNbrs(pid);          // 城防要立刻画出新模型
+  }
+  UI.panel();
+  const nm=kind==='barracks'?'兵营':`城防 Lv.${p.fort}`;
+  if(isHuman(cid)) pushLog(`🏗 ${p.name} 建成了 ${nm}`,'gold',cid);
+  return null;
+}
 
 function aiMonthly(){
   // 邻接表
@@ -1431,7 +1619,7 @@ function aiMonthly(){
         if(onEnemy&&(p.controller===c||overlordOf(p.controller)===c)){
           if(cands.length){
             const tgt=cands[idle.indexOf(a)%cands.length];
-            const path=findPath(a.prov,tgt);
+            const path=findPath(a.prov,tgt,a.owner);
             if(path&&path.length) a.path=path;
           }
           continue;
@@ -1439,14 +1627,14 @@ function aiMonthly(){
         if(!onEnemy){
           // 本土被入侵 → 优先回防迎击
           if(invProv&&(p.owner===c||overlordOf(p.owner)===c)){
-            const path=findPath(a.prov,invProv);
+            const path=findPath(a.prov,invProv,a.owner);
             if(path&&path.length){ a.path=path; continue; }
           }
           const path=bfsTo(a.prov,q=>q.owner===foe||q.controller===foe);
           if(path) a.path=path;
         }
       } else if(a.prov!==cc.capital){
-        const path=findPath(a.prov,cc.capital);
+        const path=findPath(a.prov,cc.capital,a.owner);
         if(path) a.path=path;
       }
     }
@@ -1827,7 +2015,7 @@ let _scenBase=null;
 let _worldSeed=SCENARIO_SEED;
 function captureScenarioBase(){
   _scenBase={
-    prov:provinces.map(p=>p?[p.owner,p.tax,p.prod,p.man,p.name]:null),
+    prov:provinces.map(p=>p?[p.owner,p.tax,p.prod,p.man,p.name,p.fort||0,p.barracks||0]:null),
     ctry:countries.map(c=>c?[c.name,c.color.join(','),c.capital,c.alive?1:0,
                              Math.round(c.gold*10)/10, c.overlord||0, c.subject||0,
                              (c.allies||[]).join('/')]:null),
@@ -1859,6 +2047,8 @@ function makeScenario(meta){
       if(p.prod!==b[2]){ if(!o)o={}; o.p=p.prod; }
       if(p.man!==b[3]){ if(!o)o={}; o.m=p.man; }
       if(p.name!==b[4]){ if(!o)o={}; o.n=p.name; }
+      if((p.fort||0)!==(b[5]||0)){ if(!o)o={}; o.f=p.fort||0; }
+      if((p.barracks||0)!==(b[6]||0)){ if(!o)o={}; o.b=p.barracks||0; }
     }
     if(o) s.provinces[i]=o;
   }
@@ -1981,6 +2171,9 @@ function applyScenario(s,keepBase){
     if(o.p!=null) p.prod=Math.max(1,Math.min(99,+o.p|0));
     if(o.m!=null) p.man=Math.max(1,Math.min(99,+o.m|0));
     if(o.n) p.name=sanitizeCountryName(o.n);
+    // 城防 / 兵营：地图作者可以直接在编辑器里给省份摆要塞
+    if(o.f!=null) p.fort=Math.max(0,Math.min(FORT_MAX,+o.f|0));
+    if(o.b!=null) p.barracks=+o.b?1:0;
     p.controller=p.owner; p.siege=0;
   }
 
@@ -2065,7 +2258,8 @@ function applyScenario(s,keepBase){
   }
   invalidateCamps();
   labelsDirty=true;
-  if(!keepBase) _scenBase=null;     // 世界已不是"默认世界"，基线作废
+  /* 基线不清：它永远是「默认世界」的快照（在 worldMakeCountries 里采的），
+     导入一张地图之后再导出，diff 才对得上。 */
   return null;
 }
 
@@ -2141,6 +2335,10 @@ function worldMakeProvinces(cidMap,feats){
 function worldMakeCountries(cidMap,feats){
   buildCountries(cidMap,feats);
   ensureAllCountryFields();
+  /* 基线必须在「世界刚建好、还没被剧本动过」的这一刻采。
+     以前是 makeScenario 里懒采的：谁要是先改了世界再导出，
+     采到的就是改过的世界，diff 直接变成空的（地图导出后什么都没了）。 */
+  captureScenarioBase();
 }
 function buildWorld(){
   const feats=worldDecode();
@@ -2153,9 +2351,10 @@ function buildWorld(){
 function makeSaveData(){
   return {v:1,dayCount,cal:{...cal},player,paused,speed,mapMode,
     // [5] 是故土记录 former：复国之机靠它，必须一起存/传
+    // [6][7] 是城防等级 / 兵营：建筑也得进存档
     prov:provinces.slice(1).map(p=>p.former&&p.former.length
-      ?[p.owner,p.controller,p.tax,p.prod,p.man,p.former.slice()]
-      :[p.owner,p.controller,p.tax,p.prod,p.man]),
+      ?[p.owner,p.controller,p.tax,p.prod,p.man,p.former.slice(),p.fort||0,p.barracks||0]
+      :[p.owner,p.controller,p.tax,p.prod,p.man,0,p.fort||0,p.barracks||0]),
     ct:countries.slice(1).map(c=>c?(c.featId==='CUSTOM'
       ?{a:c.alive?1:0,g:Math.round(c.gold*10)/10,mp:Math.round(c.mp),r:c.ruler,ov:c.overlord||0,al:(c.allies||[]).slice(),n:c.name,col:c.color,cap:c.capital,sj:c.subject||0}
       :{a:c.alive?1:0,g:Math.round(c.gold*10)/10,mp:Math.round(c.mp),r:c.ruler,ov:c.overlord||0,al:(c.allies||[]).slice(),sj:c.subject||0}):null),
@@ -2169,7 +2368,7 @@ function makeSaveData(){
 /* 把快照写回当前世界（纯状态，不触碰界面） */
 function applySaveData(d){
   wars=d.wars||[]; truces=d.truces||{};
-  d.prov.forEach((a,i)=>{ const p=provinces[i+1]; if(!p) return; p.owner=a[0];p.controller=a[1];p.tax=a[2];p.prod=a[3];p.man=a[4];p.siege=0; p.former=a[5]?a[5].slice():[]; });
+  d.prov.forEach((a,i)=>{ const p=provinces[i+1]; if(!p) return; p.owner=a[0];p.controller=a[1];p.tax=a[2];p.prod=a[3];p.man=a[4];p.siege=0; p.former=a[5]?a[5].slice():[]; p.fort=a[6]||0; p.barracks=a[7]||0; });
   d.ct.forEach((a,i)=>{
     if(!a) return;
     const id=i+1;
@@ -2258,6 +2457,9 @@ if(typeof module!=='undefined'&&module.exports){
     decodeTopo,buildLand,buildProvinces,buildCountries,rebuildLabels,recomputeCap,totalDev,devOf,
     rotateWorld,MAP_SHIFT,pruneTinyIslands,TINY_ISLAND_PIX,wrapWorldX,nearestWorldX,
     worldDecode,worldMakeLand,worldMakeProvinces,worldMakeCountries,
+    labelFontOf,labelMinArea,
+    FORT_MAX,FORT_GARRISON,FORT_DAMP,FORT_LUCK,BARRACKS_COST,FORT_COST,BUILD_NAMES,
+    ensureProvinceBuildings,garrisonOf,buildCost,buildBuilding,zocMapFor,zocAllows,siegeDailyProgress,
     tickDay,advanceDay,mergeArmies,resolveBattles,resolveSieges,monthlyTick,economy,aiMonthly,
     declareWar,makePeace,transferProvince,checkDeath,vassalize,releaseStaleOccupations,
     warScore,peaceCost,releaseCost,canDemandProvince,occRatio,atWar,inWar,truceBetween,truceKey,

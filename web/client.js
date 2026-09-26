@@ -513,6 +513,9 @@ let imgDirty=true, selDirty=true;
 let _frameKey='', _lastRealRender=0, _labelHasContent=false;
 /* 城镇层状态：applyRenderScale 也要用到 townKey，同样必须先声明 */
 let townKey='', _townHasContent=false, _townWorld=null, _townCount=0;
+/* 建筑版本号：建/拆城防要作废城镇层缓存，否则地图上的要塞模型不会更新 */
+let _bldEpoch=0;
+let _fortCount=0;                     // 本帧画了几座要塞（测试与性能面板用）
 
 /* ---------- 标签层缓存 ----------
    国家名/省名是静态的，但原来每帧都用 strokeText+fillText 重画上百个文字，
@@ -1181,17 +1184,60 @@ function ensureLabels(){
 }
 function drawLabels(){
   lctx.textAlign='center';
+  /* 标签防叠：文字是画在一张带透明通道的层上的，重叠了就是一团糊。
+     每画一个就把它占的矩形记下来，后来的压上去就跳过。
+     小比例尺下每个国家只留最大的那块国土的标签（不然俄罗斯会同时冒好几个）。 */
+  const boxes=[];
+  const fits=(x,y,w,h)=>{
+    const x0=x-w/2, x1=x+w/2, y0=y-h*0.8, y1=y+h*0.3;
+    for(let i=0;i<boxes.length;i++){
+      const b=boxes[i];
+      if(x0<b[2]&&x1>b[0]&&y0<b[3]&&y1>b[1]) return false;
+    }
+    boxes.push([x0,y0,x1,y1]);
+    return true;
+  };
+  const onePerCountry = cam.z<2.0;
   if(cam.z<3.6){
-    lctx.font='600 12px "Microsoft YaHei",sans-serif';
+    // 国名：一块国土一个（或几个）标签。字号随国土面积走，缩放决定最小的那个露不露脸
+    const minArea=labelMinArea(cam.z);
     lctx.lineWidth=3; lctx.strokeStyle='rgba(0,0,0,0.75)'; lctx.fillStyle='#f0e6cf';
     for(let c=1;c<countries.length;c++){
-      const cc=countries[c]; if(!cc||!cc.alive||!cc.lx) continue;
-      const [sx,sy]=w2s(nearX(cc.lx),cc.ly);
-      if(sx<-60||sx>cw+60||sy<0||sy>ch) continue;
-      _labelHasContent=true;
-      lctx.strokeText(cc.name,sx,sy); lctx.fillText(cc.name,sx,sy);
+      const cc=countries[c];
+      if(!cc||!cc.alive||!cc.labels||!cc.labels.length) continue;
+      let drawn=0;
+      for(const lb of cc.labels){
+        if(lb[2]<minArea) continue;
+        if(onePerCountry&&drawn>0) break;
+        const [sx,sy]=w2s(nearX(lb[0]),lb[1]);
+        if(sx<-80||sx>cw+80||sy<0||sy>ch) continue;
+        const w=cc.name.length*lb[3]*1.02, h=lb[3]*1.5;
+        if(!fits(sx,sy,w,h)) continue;
+        _labelHasContent=true; drawn++;
+        lctx.font='600 '+lb[3].toFixed(0)+'px "Microsoft YaHei",sans-serif';
+        lctx.strokeText(cc.name,sx,sy); lctx.fillText(cc.name,sx,sy);
+      }
     }
   } else {
+    // 大比例尺下省名才是主角；国名只留「大国」的一行淡影，免得整屏都是字
+    const minArea=Math.max(labelMinArea(cam.z),4000);
+    for(let c=1;c<countries.length;c++){
+      const cc=countries[c];
+      if(!cc||!cc.alive||!cc.labels||!cc.labels.length) continue;
+      let drawn=0;
+      for(const lb of cc.labels){
+        if(lb[2]<minArea) continue;
+        if(drawn>0) break;                       // 大比例尺下国名也只要一个，省名才是主角
+        const [sx,sy]=w2s(nearX(lb[0]),lb[1]);
+        if(sx<-80||sx>cw+80||sy<0||sy>ch) continue;
+        const f=lb[3]*1.15, w=cc.name.length*f*1.02, h=f*1.5;
+        if(!fits(sx,sy,w,h)) continue;
+        _labelHasContent=true; drawn++;
+        lctx.font='600 '+f.toFixed(0)+'px "Microsoft YaHei",sans-serif';
+        lctx.fillStyle='rgba(240,230,207,0.42)';
+        lctx.fillText(cc.name,sx,sy);
+      }
+    }
     lctx.font='10px "Microsoft YaHei",sans-serif';
     lctx.lineWidth=2; lctx.strokeStyle='rgba(0,0,0,0.6)'; lctx.fillStyle='rgba(235,225,200,0.8)';
     for(let i=1;i<provinces.length;i++){
@@ -1199,6 +1245,8 @@ function drawLabels(){
       // 按屏幕坐标裁剪（世界坐标在接缝两侧不连续，不能直接比大小）
       const [sx,sy]=w2s(nearX(p.cx),p.cy+7);
       if(sx<-40||sx>cw+40||sy<0||sy>ch) continue;
+      const w=p.name.length*10*1.02, h=15;
+      if(!fits(sx,sy,w,h)) continue;
       _labelHasContent=true;
       lctx.strokeText(p.name,sx,sy); lctx.fillText(p.name,sx,sy);
     }
@@ -1300,6 +1348,76 @@ function paintTown(g,cx,cy,tier,cap){
   _townMode='halo'; townShapes(g,cx,cy,tier,cap);
   _townMode='color'; townShapes(g,cx,cy,tier,cap);
 }
+/* ---------- 城防图标 ----------
+   有城防的省份不再用城镇图标，改画一座带等级徽记的要塞 ——
+   星形城墙 + 角楼 + 中心主楼，右下角一个金圈写着等级。
+   等级越高，要塞画得越大，一眼就能看出哪座城难啃。 */
+const FORT_R=[0,6.0,6.9,7.8,8.8,10.0];   // 等级越高要塞越大
+const _fortSprite=[];
+function paintFort(g,cx,cy,lv,cap){
+  const R=FORT_R[lv]||6;
+  g.save(); g.translate(cx,cy+1.8); g.scale(1,0.62);
+  g.beginPath(); g.arc(0,0,R+2.0,0,6.2832); g.restore();
+  g.fillStyle='rgba(24,16,6,0.32)'; g.fill();
+  // 星形城墙
+  const N=6;
+  g.beginPath();
+  for(let i=0;i<N*2;i++){
+    const a=-Math.PI/2+i*Math.PI/N, rr=(i%2)?R*0.76:R;
+    const px=cx+Math.cos(a)*rr, py=cy+Math.sin(a)*rr;
+    if(i===0) g.moveTo(px,py); else g.lineTo(px,py);
+  }
+  g.closePath();
+  g.fillStyle=wallFill(); g.fill();
+  g.strokeStyle=lineCol(); g.lineWidth=_townMode==='halo'?3.0:1.15; g.stroke();
+  // 角楼
+  for(let i=0;i<N;i++){
+    const a=-Math.PI/2+i*Math.PI*2/N;
+    const tx=cx+Math.cos(a)*R, ty=cy+Math.sin(a)*R;
+    g.beginPath(); rectPath(g,tx-2.0,ty-2.0,4.0,4.0);
+    g.fillStyle=wallFill(); g.fill();
+    g.strokeStyle=lineCol(); g.lineWidth=lineW(); g.stroke();
+  }
+  // 中心主楼
+  g.beginPath(); rectPath(g,cx-R*0.32,cy-R*0.32,R*0.64,R*0.64);
+  g.fillStyle=_townMode==='halo'?HaloFill:'#efe3c8'; g.fill();
+  g.strokeStyle=lineCol(); g.lineWidth=lineW(); g.stroke();
+  if(_townMode==='halo') return;         // 光晕那一遍不画徽记和旗
+  // 等级徽记：右下角金圈 + 数字
+  const bx=cx+R*0.92, by=cy+R*0.92, br=4.8;
+  g.beginPath(); g.arc(bx,by,br,0,6.2832);
+  g.fillStyle='#f0cd72'; g.fill();
+  g.strokeStyle='#3a2a1a'; g.lineWidth=1.0; g.stroke();
+  g.fillStyle='#2a2018'; g.font='700 7.5px "Microsoft YaHei",sans-serif';
+  g.textAlign='center'; g.textBaseline='middle';
+  g.fillText(String(lv),bx,by+0.4);
+  g.textAlign='left'; g.textBaseline='alphabetic';
+  if(cap){
+    const px=cx, py=cy-R-7.4;
+    g.beginPath(); g.moveTo(px,py); g.lineTo(px,py+6.6);
+    g.strokeStyle='#3a2a1a'; g.lineWidth=1.2; g.stroke();
+    g.beginPath(); g.moveTo(px,py); g.lineTo(px+6.4,py+2.2); g.lineTo(px,py+4.4); g.closePath();
+    g.fillStyle='#f0cd72'; g.fill();
+    g.strokeStyle='#6d4c10'; g.lineWidth=0.85; g.stroke();
+  }
+}
+function fortSprite(lv,cap){
+  const k=lv*2+(cap?1:0);
+  let cv=_fortSprite[k];
+  if(cv) return cv;
+  const R=FORT_R[lv]||6;
+  const W=Math.ceil((R+6)*2), H=Math.ceil(R+6+R+8);
+  cv=document.createElement('canvas');
+  cv.width=Math.ceil(W*TOWN_SS); cv.height=Math.ceil(H*TOWN_SS);
+  const g=cv.getContext('2d');
+  g.setTransform(TOWN_SS,0,0,TOWN_SS,0,0);
+  g.lineJoin='round';
+  _townMode='halo'; paintFort(g,W/2,R+6,lv,cap);
+  _townMode='color'; paintFort(g,W/2,R+6,lv,cap);
+  cv._ax=W/2; cv._ay=R+6; cv._w=W; cv._h=H;
+  _fortSprite[k]=cv;
+  return cv;
+}
 function townSprite(tier,cap){
   const k=tier*2+(cap?1:0);
   let cv=_townSprite[k];
@@ -1347,6 +1465,15 @@ function drawTowns(){
     if(sx<-40||sx>cw+40||sy<-40||sy>ch+40) continue;
     const own=countries[p.owner]||countries[p.controller];
     const isCap=!!(own&&own.alive&&own.capital===p.id);
+    // 有城防 -> 画要塞模型（中比例尺就出现，因为它决定能不能通行）
+    const fortLv=p.fort|0;
+    if(fortLv>0){
+      const sp=fortSprite(fortLv,isCap);
+      const w=sp._w*sc, h=sp._h*sc;
+      tctx.drawImage(sp,sx-sp._ax*sc,sy-sp._ay*sc,w,h);
+      n++; _fortCount++; continue;
+    }
+    if(lodTier<2) continue;              // 中比例尺只画城防，不画普通城镇
     const dev=(p.tax||0)+(p.prod||0)+(p.man||0);
     let tier=dev>=10?3:dev>=8?2:dev>=6?1:0;
     if(isCap&&tier<2) tier=2;
@@ -1358,15 +1485,15 @@ function drawTowns(){
   if(n){ _townCount=n; _townHasContent=true; }
 }
 function ensureTownLayer(){
-  const key=cam.x.toFixed(2)+'|'+cam.y.toFixed(2)+'|'+cam.z.toFixed(4)+'|'+cw+'|'+ch+'|'+dpr+'|'+labelEpoch+'|'+lodTier;
+  const key=cam.x.toFixed(2)+'|'+cam.y.toFixed(2)+'|'+cam.z.toFixed(4)+'|'+cw+'|'+ch+'|'+dpr+'|'+labelEpoch+'|'+lodTier+'|'+_bldEpoch;
   if(key===townKey) return;
-  townKey=key; _townCount=0; _townHasContent=false;
+  townKey=key; _townCount=0; _fortCount=0; _townHasContent=false;
   const w=Math.max(1,Math.floor(cw*dpr)), h=Math.max(1,Math.floor(ch*dpr));
   if(townCv.width!==w||townCv.height!==h){ townCv.width=w; townCv.height=h; }
   tctx.setTransform(1,0,0,1,0,0); tctx.clearRect(0,0,w,h);
   tctx.setTransform(dpr,0,0,dpr,0,0);
-  // 城镇只在大比例尺出现
-  if(lodTier<2) return;
+  // 城镇层：中比例尺起画城防，大比例尺再补上普通城镇
+  if(lodTier<1) return;
   if(!provinces||provinces.length<2) return;
   ensureTownTable();
   drawTowns();
@@ -2727,6 +2854,15 @@ function infoTab(){
       <div class="row"><span>发展度</span><b>${devOf(p)}</b>（税${p.tax} 产${p.prod} 兵${p.man}）</div>
       <div class="row"><span>月收入</span>${((p.tax+p.prod)*0.05).toFixed(2)} 金</div>`;
     if(p.siege>0) h+=`<div class="row"><span>围城进度</span><b>${Math.floor(p.siege)}%</b></div>`;
+    // 建筑：兵营 / 城防。城防等级同时决定驻军与控制区
+    {
+      const parts=[];
+      if(p.barracks) parts.push('<span style="color:#a8d8a0">🏛 兵营</span>');
+      if(p.fort) parts.push(`<span style="color:#e8c86a">🏯 城防 Lv.${p.fort}</span>`);
+      h+=`<div class="row"><span>建筑</span>${parts.length?parts.join(' · '):'—'}</div>`;
+      if(p.fort) h+=`<div class="row"><span>驻军</span>${garrisonOf(p)} 人 · <span class="hint">外圈 ${p.nbrs.length} 省为控制区，敌军不能横穿</span></div>`;
+      if(p.barracks) h+=`<div class="row"><span>兵营效果</span>驻扎本省的军队维护费 <b>减半</b></div>`;
+    }
     if(p.owner===player){
       const c=countries[player];
       h+=`<div>
@@ -2746,6 +2882,17 @@ function infoTab(){
       h+=`<div>
         <button class="act" style="background:#1a2c3e;border-color:#5080b0;color:#aae0ff" data-act="recruit-navy" data-v="${p.id}" ${canNavyRec?'':'disabled'} ${isCoast?`title="组建周期 ${Math.round(NAVY_DAYS/30)} 个月"`:'title="该省无海岸"'} >${isCoast?`组建舰队（35金+4k人力 · ${Math.round(NAVY_DAYS/30)}个月下水）`:'该省无海岸'}</button>
       </div>`;
+      // 建造：兵营 / 城防（城防要在地图上重画模型，所以建完刷新面板）
+      if(p.controller===player){
+        const canHere=true;
+        const bcst=buildCost(p,'barracks'), fcst=buildCost(p,'fort');
+        h+=`<div class="hint" style="margin-top:6px;color:#c9a959">🏗 城市建设</div><div>`;
+        if(p.barracks) h+=`<button class="act" disabled>🏛 兵营已建成（驻军维护费减半）</button>`;
+        else h+=`<button class="act" style="background:#1e2e1c;border-color:#5a8a50;color:#b8e0a8" data-act="build-barracks" data-v="${p.id}" ${(canHere&&c.gold>=bcst)?'':'disabled'} title="驻扎在本省的军队维护费减半。本省被敌人占领时失效。">🏛 建造兵营（${bcst}金 · 驻扎军队维护费减半）</button>`;
+        if(p.fort>=FORT_MAX) h+=`<button class="act" disabled>🏯 城防已满级 Lv.${FORT_MAX}（驻军 ${garrisonOf(p)}）</button>`;
+        else h+=`<button class="act" style="background:#2e2a18;border-color:#8a7a40;color:#e8d8a0" data-act="build-fort" data-v="${p.id}" ${(canHere&&c.gold>=fcst)?'':'disabled'} title="每级 +1000 驻军；外圈一圈成为控制区，敌军不能在圈内横穿，必须先把城防打下来。攻方兵力越少、城防越高，围城越慢。">🏯 ${p.fort?`升级城防 Lv.${p.fort} → Lv.${p.fort+1}`:`建造城防 Lv.1`}（${fcst}金 · 驻军 ${(p.fort+1)*FORT_GARRISON}）</button>`;
+        h+=`</div>`;
+      }
       // 划地分封：进地图模式一次性圈出整片封地，再建立傀儡国
       if(!overlordOf(player)&&c.provList.length>1&&p.controller===player){
         h+=`<div><button class="act" style="background:#2a2440;border-color:#6a5a9a;color:#d0b0ff" data-act="found-vassal" data-v="${p.id}" title="进入「分封地图」：以该省为首府，在地图上连续点选要封出去的省份（可点「＋纳入接壤省」整片划），最后一次性建立傀儡国。傀儡国叛乱倾向只有附庸国的 5%">🏳 划地分封（建立傀儡国）</button></div>`;
@@ -2949,6 +3096,8 @@ document.addEventListener('click',e=>{
     case 'mode': setMode(v); break;
     case 'tab': uiTab=v; document.querySelectorAll('#panel-tabs button').forEach(b=>b.classList.toggle('active',b.dataset.v===v)); refreshPanel(); break;
     case 'develop': doDevelop(+v); break;
+    case 'build-barracks': doBuild(+v,'barracks'); break;
+    case 'build-fort': doBuild(+v,'fort'); break;
     case 'recruit': doRecruit(+v); break;
     case 'recruit-navy': doRecruitNavy(+v); break;
     case 'disband': if(MP.online){ mpCmd({c:'disband',army:+v}); break; } armies=armies.filter(a=>a.id!==+v); if(selectedArmy===+v)selectedArmy=0; refreshPanel(); break;
@@ -3120,6 +3269,15 @@ function doRecruit(pid){
   c.gold-=25; c.mp-=5000;
   addRecruit(player,pid,5000,false);
   pushLog(`${p.name} 开始征兵，约 ${Math.round(RECRUIT_DAYS/30)} 个月后成军`,'gold');
+  refreshPanel();
+}
+/* 建造：单机直接建，联机交给服务端裁定（金币、归属都在那边校验） */
+function doBuild(pid,kind){
+  if(MP.online) return mpCmd({c:'build',prov:pid,kind});
+  const err=buildBuilding(player,pid,kind);
+  if(err){ pushLog('建造失败：'+err,'war'); return; }
+  labelsDirty=true; _bldEpoch++;
+  recolorProvAndNbrs(pid);      // 城防要换地图模型，兵营也要刷新面板
   refreshPanel();
 }
 function doRecruitNavy(pid){
@@ -3534,7 +3692,7 @@ function handleClick(sx,sy){
       if(MP.online){
         // 先用本地结果立刻画出行军路线（世界生成是确定性的，路径与服务端一致），
         // 等服务端那一帧增量回来再以它为准；未被确认的会在 1.2 秒后撤掉
-        const np = a.isNavy ? findNavalPath(a.prov,pid) : findPath(a.prov,pid);
+        const np = a.isNavy ? findNavalPath(a.prov,pid) : findPath(a.prov,pid,a.owner);
         if(np){
           if(a.isNavy){ a.navPath=np; a.navIdx=0; a.navIdxF=0; a.navIdxSrv=0; a.dstProv=pid; a.path=[]; a.prog=0; }
           else { a.path=np; a.prog=0; a.progSrv=0; a.dstProv=np[np.length-1]; }
@@ -3546,9 +3704,11 @@ function handleClick(sx,sy){
         if(np){ a.navPath=np; a.navIdx=0; a.dstProv=pid; a.path=[]; a.prog=0; }
         else pushLog(provinces[pid].coastPix.length?'无法找到通往该省的海路（被冰封阻隔？）':'目标省没有海岸线，无法派遣舰队');
       } else {
-        const path=findPath(a.prov,pid);
+        const path=findPath(a.prov,pid,a.owner);
         if(path){ a.path=path; a.prog=0; }
-        else pushLog('无法找到通往该省的陆路');
+        else pushLog(findPath(a.prov,pid,0)
+          ? '打不通：路上有敌方城防，必须先把它攻下来（城防外圈禁止敌军横穿）'
+          : '无法找到通往该省的陆路');
       }
     }
     selectedProv=pid;
