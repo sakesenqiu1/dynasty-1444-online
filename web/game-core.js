@@ -439,6 +439,12 @@ function labelMinArea(z){
 }
 /* 国名标签的几何：每个连通块一份「每一列的最上/最下行」，
    渲染时把文字切竖条、逐列贴到国土的实际高度上，字就完全附着了。 */
+/* ---------- 国名标签 ----------
+   一片国土一个国名：按陆路连通块分块（本土一块、每块飞地各一块），
+   每块算出自己的**主轴方向**（二阶矩）和沿主轴/垂直方向的跨度，
+   渲染时把国名按这个角度斜着写上去 ——
+   名字顺着国土的走向摆，但字形本身不扭曲，也不会溢出到邻国或海上。
+   飞地各自成块，所以飞地上也会有自己的国名。 */
 function rebuildLabels(){
   for(let c=1;c<countries.length;c++){
     const cc=countries[c];
@@ -466,40 +472,55 @@ function rebuildLabels(){
     let bestArea=-1, bx=0, by=0;
     for(let ci=0;ci<comps.length;ci++){
       const comp=comps[ci];
-      // 2) 列范围 + 面积
-      let c0=1<<30, c1=-1, area=0;
+      let area=0, sx=0, sy=0;
       for(const pid of comp){
         const p=provinces[pid];
-        for(const px of p.pix){ const col=px%COLS; if(col<c0)c0=col; if(col>c1)c1=col; area++; }
+        for(const px of p.pix){ sx+=px%COLS+0.5; sy+=((px/COLS)|0)+0.5; area++; }
       }
-      if(!area||c1<c0) continue;
+      if(!area) continue;
       cc.labelPx+=area;
-      const W=c1-c0+1;
-      const top=new Int16Array(W).fill(32767), bot=new Int16Array(W).fill(-1);
-      // 3) 每一列的最上与最下行 —— 这就是「国土的形状」
-      let sx=0, sy=0;
+      const cx=sx/area, cy=sy/area;
+      if(area>bestArea){ bestArea=area; bx=cx; by=cy; }
+      // 锚点不能直接用质心：环形/新月形的质心可能落在国土外面。
+      // 取「离质心最近的那个本国像素」，保证名字一定起在自家地上。
+      let ax=cx, ay=cy, bd=Infinity;
       for(const pid of comp){
         const p=provinces[pid];
         for(const px of p.pix){
-          const r=(px/COLS)|0, col=px%COLS, k=col-c0;
-          if(r<top[k]) top[k]=r;
-          if(r>bot[k]) bot[k]=r;
-          sx+=col+0.5; sy+=r+0.5;
+          const col=px%COLS+0.5, row=((px/COLS)|0)+0.5;
+          const d=(col-cx)*(col-cx)+(row-cy)*(row-cy);
+          if(d<bd){ bd=d; ax=col; ay=row; }
         }
       }
-      if(area>bestArea){ bestArea=area; bx=sx/area; by=sy/area; }
-      // 4) 沿着列切成几条带，每条带各画一遍国名（宽国土上名字就铺开了）
-      const bands=Math.max(1,Math.min(LBL_BAND_MAX,Math.round(W/LBL_BAND_W)));
-      const bw=Math.ceil(W/bands);
-      for(let b=0;b<bands;b++){
-        const x0=c0+b*bw, x1=Math.min(c1,x0+bw-1);
-        if(x1<x0) continue;
-        let t=32767, bo=-1;
-        for(let k=x0-c0;k<=x1-c0;k++){ if(top[k]<t)t=top[k]; if(bot[k]>bo)bo=bot[k]; }
-        if(bo<0||t>bo) continue;
-        cc.labels.push({ x0, x1, c0, top, bot, comp:area,
-                         band:area*(x1-x0+1)/W, rows:bo-t+1, cols:x1-x0+1, ci });
+      // 2) 二阶矩求主轴：国土大致往哪个方向铺开
+      let mxx=0, myy=0, mxy=0;
+      for(const pid of comp){
+        const p=provinces[pid];
+        for(const px of p.pix){
+          const dx=px%COLS+0.5-ax, dy=((px/COLS)|0)+0.5-ay;
+          mxx+=dx*dx; myy+=dy*dy; mxy+=dx*dy;
+        }
       }
+      mxx/=area; myy/=area; mxy/=area;
+      let ang=0.5*Math.atan2(2*mxy, mxx-myy);
+      // 太斜了不好读：夹在 ±48° 以内（图上的样子就是微微斜着摆）
+      const LIM=48*Math.PI/180;
+      if(ang>LIM) ang=LIM; else if(ang<-LIM) ang=-LIM;
+      // 3) 沿主轴 / 垂直方向的跨度 —— 决定名字能写多大
+      const ux=Math.cos(ang), uy=Math.sin(ang);
+      let lo=1e9, hi=-1e9, hw=0;
+      for(const pid of comp){
+        const p=provinces[pid];
+        for(const px of p.pix){
+          const dx=px%COLS+0.5-ax, dy=((px/COLS)|0)+0.5-ay;
+          const t=dx*ux+dy*uy;                 // 主轴方向
+          const s=-dx*uy+dy*ux;                // 垂直方向
+          if(t<lo)lo=t; if(t>hi)hi=t;
+          const as=s<0?-s:s; if(as>hw)hw=as;
+        }
+      }
+      cc.labels.push({ x:ax, y:ay, ang, len:Math.max(1,hi-lo+1), half:Math.max(1,hw),
+                       comp:area, ci });
     }
     // 大块排前面：小比例尺下只取第一个，取到的就是本土那块最大的
     cc.labels.sort((a,b)=>b.comp-a.comp);
@@ -723,17 +744,16 @@ function inWar(c){
 function truceKey(a,b){ return a<b? a+'|'+b : b+'|'+a; }
 function truceBetween(a,b){ const t=truces[truceKey(a,b)]; return t&&t>dayCount; }
 /* ---------- 城防控制区（ZOC） ----------
-   一座完好的要塞把「自己外圈那一圈省」变成控制区：敌军不许在同一座要塞的
-   外圈里横着穿过去 —— 想绕过这座要塞，就得先把它打下来。
+   一座完好的要塞把「自己 + 外圈那一圈省」一起变成控制区：敌军都过不去 ——
+   既不能沿着外圈横着穿，也不能从要塞所在的那一格穿过去。
 
-   为什么不会出现「进不去外圈所以打不到要塞」：
-   规则只禁止「外圈 → 同一座要塞的外圈」这一种移动，
-   从外面踏进外圈是允许的，而外圈任意一格都与要塞本身相邻，
-   所以任何一支敌军都至少有一条「外面 → 外圈 → 要塞」的路。
-   要塞那一格永远可进（to===f 直接放行），这就是攻城入口。
-   攻下之后 controller 变了，控制区跟着易主，原来的主人反而被挡住。 */
+   那怎么打它？**站在外圈任意一格就能围攻这座要塞**（见 resolveSieges）：
+   外圈每一格都和要塞相邻，而从外面踏进外圈是允许的，
+   所以「外面 → 外圈 → 开始围城」这条路永远通，不会出现打不到的死局。
+   自家军队不受自己要塞的影响；要塞被攻破后控制区跟着易主，反过来挡原来的主人。 */
 
 /* 给某个行军方算出「哪些省被谁控制着」：只有和自己交战、且完好的要塞才算。
+   要塞本身也写进表里 —— 这样它自己那一格同样过不去。
    要塞数量很少，所以这张表很便宜；一次寻路建一次，不要放进 BFS 内层。 */
 function zocMapFor(mover){
   const m=new Map();                        // 省id -> [要塞省id,...]
@@ -744,6 +764,8 @@ function zocMapFor(mover){
     const holder=f.controller;
     if(!holder||holder===mover) continue;
     if(!atWar(mover,holder)) continue;
+    let z=m.get(i); if(!z){ z=[]; m.set(i,z); }
+    z.push(i);                              // 要塞自己那一格也算控制区
     const nb=f.nbrs;
     for(let k=0;k<nb.length;k++){
       const n=nb[k];
@@ -753,19 +775,33 @@ function zocMapFor(mover){
   }
   return m;
 }
-/* 从 from 走到 to 允不允许（只看城防控制区这一条） */
+/* 从 from 走到 to 允不允许（只看城防控制区这一条）。
+   规则短得很：起点不在控制区里 -> 随便进（这就是「从外面踏进外圈」的入口）；
+               起点在控制区里 -> 只能往控制区外面的省走（退出去），区内互穿一律挡住。 */
 function zocAllows(zoc,from,to){
   if(!zoc||!zoc.size) return true;
   const A=zoc.get(from);
-  if(!A) return true;                       // 起点不在任何控制区里 -> 随便进
+  if(!A) return true;
   const B=zoc.get(to);
-  if(!B) return true;                       // 目标是控制区外 -> 放行（含退出去）
-  for(let i=0;i<A.length;i++){
-    const f=A[i];
-    if(f===to) return true;                 // 走到要塞本身 -> 永远是攻城入口
-    if(B.indexOf(f)>=0) return false;       // 同一座要塞的外圈内部穿行 -> 挡住
-  }
+  if(!B) return true;
+  for(let i=0;i<A.length;i++) if(B.indexOf(A[i])>=0) return false;
   return true;
+}
+/* 站在这个省上，能围攻哪几座敌方要塞（外圈相邻的都算） */
+function hostileFortsAt(pid,mover){
+  const p=provinces[pid];
+  if(!p||!mover) return null;
+  let out=null;
+  for(const f of p.nbrs){
+    const fp=provinces[f];
+    if(!fp||!fp.fort||!fp.pix.length) continue;
+    const holder=fp.controller;
+    if(!holder||holder===mover) continue;
+    if(!atWar(mover,holder)) continue;
+    if(!out) out=[];
+    out.push(f);
+  }
+  return out;
 }
 
 function findPath(from,to,mover){
@@ -1188,18 +1224,19 @@ function resolveBattles(){
 }
 
 /* ---------- 围城 ----------
-   每日进度 = 攻方兵力 / SIEGE_DIV / 城防倍率 × 运气
+   要塞那一格敌军进不去，所以是**站在外圈围攻要塞**：
+   一支敌军只要站在某座敌方要塞的外圈上，围的就是那座要塞（等级最高的优先）。
+   外圈没有敌方要塞时，照旧围自己脚下的省。
 
+   每日进度 = 攻方兵力 / SIEGE_DIV / 城防倍率 × 运气
    城防倍率 = 1 + 等级 × FORT_SIEGE_FACTOR
      · 没有城防时恒等于 1，和以前完全一样
-     · Lv5 是 6.5 倍工期 —— 这是**与兵力无关的硬减速**，堆多少人马都绕不过去
-
+     · Lv5 是 4 倍工期 —— 这是**与兵力无关的硬减速**
    攻城兵力有上限：effStr = min(兵力, 驻军 × FORT_MAX_ADV)
-     · 这就是「不是人多到一定程度就能突破」：Lv5 驻军 5000，攻城效率最多按 4 万人算，
-       再堆 10 万 20 万也不会更快，只能靠时间磨
-   每日进度有上限 100/FORT_MIN_DAYS[等级] —— 即「最短围城天数」，
-   一座城堡至少拖住 1~3 个月，多少兵马都一样：Lv1 三十天、Lv3 六十天、Lv5 九十天。
-   下限是最短工期的 10 倍，弱旅也能慢慢磨下来，不会出现永远 0 的僵局。
+     · 这就是「不是人多到一定程度就能突破」
+   每日进度有上限 100/FORT_MIN_DAYS[等级] —— 最短围城天数，
+   一座城堡至少拖住 1~3 个月，多少兵马都一样。
+   下限是最短工期的 10 倍，弱旅也能慢慢磨下来。
    运气 = 1 ± FORT_LUCK，每天摇一次。 */
 function siegeDailyProgress(bstr,p){
   const lv=p&&p.fort>0?p.fort:0;
@@ -1212,9 +1249,21 @@ function siegeDailyProgress(bstr,p){
   const rate=(eff/SIEGE_DIV)/(1+lv*FORT_SIEGE_FACTOR)*luck;
   return Math.min(cap, Math.max(floor, rate));
 }
+/* 攻城目标：脚下有敌方要塞就围它，否则围脚下的省 */
+function siegeTargetFor(pid,owner){
+  const list=hostileFortsAt(pid,owner);
+  if(!list) return pid;
+  let best=list[0];
+  for(const f of list) if((provinces[f].fort||0)>(provinces[best].fort||0)) best=f;
+  return best;
+}
 function resolveSieges(){
+  // 先按「实际围攻的目标省」归集：站在外圈的军队，围攻的是那座要塞
   const byProv=new Map();
-  for(const a of armies){ let l=byProv.get(a.prov); if(!l){l=[];byProv.set(a.prov,l);} l.push(a); }
+  for(const a of armies){
+    const tgt=siegeTargetFor(a.prov,a.owner);
+    let l=byProv.get(tgt); if(!l){l=[];byProv.set(tgt,l);} l.push(a);
+  }
   for(const [pid,list] of byProv){
     if(battleProvs.has(pid)) continue;
     const p=provinces[pid];
@@ -1226,7 +1275,7 @@ function resolveSieges(){
         p.siege=0;
         const old=p.controller;
         p.controller=bowner;
-        // 城防跟着省一起易主：原来的控制区消失，攻方接手后反过来挡原主
+        // 城防跟着省一起易主：控制区消失，攻方接手后反过来挡原主
         UI.recolorNbrs(pid);
         const fortTxt=p.fort?`（城防 Lv.${p.fort} 被攻破）`:'';
         pushLogWorld(`${countries[bowner].name} 攻占了 ${p.name}${fortTxt}（原属 ${countries[old].name}）`,'war',[old,bowner],
@@ -2548,7 +2597,7 @@ if(typeof module!=='undefined'&&module.exports){
     FORT_MAX,FORT_GARRISON,FORT_SIEGE_FACTOR,FORT_MAX_ADV,FORT_LUCK,FORT_MIN_DAYS,FORT_MIN_FRAC,
     BARRACKS_COST,BARRACKS_DAYS,FORT_COST,FORT_DAYS,BUILD_NAMES,
     ensureProvinceBuildings,garrisonOf,buildCost,buildDays,buildBuilding,demolishBuilding,tickBuild,
-    zocMapFor,zocAllows,siegeDailyProgress,
+    zocMapFor,zocAllows,hostileFortsAt,siegeTargetFor,siegeDailyProgress,
     tickDay,advanceDay,mergeArmies,resolveBattles,resolveSieges,monthlyTick,economy,aiMonthly,
     declareWar,makePeace,transferProvince,checkDeath,vassalize,releaseStaleOccupations,
     warScore,peaceCost,releaseCost,canDemandProvince,occRatio,atWar,inWar,truceBetween,truceKey,

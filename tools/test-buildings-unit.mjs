@@ -227,9 +227,12 @@ const zoc = run(`
     if(!provinces[r].nbrs.includes(q)) continue;
     if(zocAllows(zocB2,r,q)) allowed++; else blocked++;
   }
-  // 要塞本身永远可进
+  // 要塞本身：敌军必须进不去（这就是「不能从城墙所在地块穿越」）
   let toFort=0, toFortOk=0;
   for(const r of ring){ toFort++; if(zocAllows(zocB2,r,F)) toFortOk++; }
+  // 站在外圈任意一格，围攻目标都应当是那座要塞
+  let siegeHit=0;
+  for(const r of ring) if(siegeTargetFor(r,B.id)===F) siegeHit++;
   // 自家军队不受自己要塞的影响
   let ownBlocked=0;
   for(const r of ring) for(const q of ring){
@@ -238,7 +241,7 @@ const zoc = run(`
   }
   provinces[F].fort=0;
   return { A:A.id, B:B.id, F, fname:provinces[F].name, ring:ring.length,
-           beforeRing, afterRing, blocked, allowed, toFort, toFortOk, ownBlocked };
+           beforeRing, afterRing, blocked, allowed, toFort, toFortOk, siegeHit, ownBlocked };
 `);
 if (!zoc) {
   console.log('  SKIP  没找到合适的要塞位置');
@@ -247,51 +250,56 @@ if (!zoc) {
   check('没有城防时没有控制区', zoc.beforeRing === 0, zoc.beforeRing);
   check('建了城防之后外圈全部变成控制区', zoc.afterRing === zoc.ring, [zoc.afterRing, zoc.ring]);
   check('敌军在外圈内部横向穿行会被挡', zoc.blocked > 0 && zoc.allowed === 0, [zoc.blocked, zoc.allowed]);
-  check('要塞本身永远是攻城入口（外圈每一格都能直接攻打）',
-    zoc.toFort === zoc.ring && zoc.toFortOk === zoc.ring, [zoc.toFortOk, zoc.toFort]);
+  check('【核心】要塞所在的那一格敌军进不去（不能从城墙所在地块穿越）',
+    zoc.toFortOk === 0, [zoc.toFortOk, zoc.toFort]);
+  check('【核心】站在外圈任意一格都能围攻这座要塞', zoc.siegeHit === zoc.ring, [zoc.siegeHit, zoc.ring]);
   check('自家军队不受自己要塞控制区影响', zoc.ownBlocked === 0, zoc.ownBlocked);
 }
 
-/* ================= 5. 【核心】控制区不会把自己变成打不到的铁乌龟 ================= */
-console.log('\n-- 5. 【核心】穷举：任何能在无城防时走到要塞的省，有城防时也一定走得到 --');
+/* ================= 5. 【核心】控制区不会让要塞变成打不到的铁乌龟 ================= */
+console.log('\n-- 5. 【核心】穷举：任何能走到要塞的省，有城防时也一定能走到「能围攻它的外圈」 --');
 const reach = run(`
   const A=countries.find(c=>c&&c.alive&&c.provList.length>10);
   const B=countries.find(c=>c&&c.alive&&c.id!==A.id&&c.provList.length>10&&!atWar(A.id,c.id));
   declareWar(B.id,A.id);
   const out=[];
-  // 挑 6 个 A 的省当要塞，逐个穷举
   const cands=A.provList.filter(pid=>provinces[pid].pix.length&&provinces[pid].nbrs.length>=3).slice(0,6);
   for(const F of cands){
+    const ring=provinces[F].nbrs.filter(r=>provinces[r].pix.length);
     provinces[F].fort=0;
     const free=[];
     for(let i=1;i<provinces.length;i++){
       const p=provinces[i];
       if(!p||!p.pix.length||i===F) continue;
-      free.push(findPath(i,F,B.id)!==null);          // 无城防时能不能到
+      free.push(findPath(i,F,B.id)!==null);          // 无城防时能不能到要塞
     }
     provinces[F].fort=4;
-    let lost=0, lostIds=[], tested=0;
+    let lost=0, lostIds=[], tested=0, canEnterFort=0;
     let k=0;
     for(let i=1;i<provinces.length;i++){
       const p=provinces[i];
       if(!p||!p.pix.length||i===F) continue;
+      if(findPath(i,F,B.id)!==null) canEnterFort++;   // 有城防后还能进要塞 = bug
       if(free[k++]){
         tested++;
-        if(findPath(i,F,B.id)===null){ lost++; if(lostIds.length<5) lostIds.push(i); }
+        // 至少要能走到外圈某一格，才谈得上围攻
+        const canSiege=ring.some(r=>findPath(i,r,B.id)!==null);
+        if(!canSiege){ lost++; if(lostIds.length<5) lostIds.push(i); }
       }
     }
     provinces[F].fort=0;
-    out.push({ F, name:provinces[F].name, tested, lost, lostIds });
+    out.push({ F, name:provinces[F].name, tested, lost, lostIds, canEnterFort });
   }
   return out;
 `);
-let totalTested = 0, totalLost = 0;
+let totalTested = 0, totalLost = 0, totalEnter = 0;
 for (const r of reach) {
-  totalTested += r.tested; totalLost += r.lost;
-  console.log(`  要塞 ${r.name}：${r.tested} 个省原本能打到，建城防后 ${r.lost} 个打不到`);
+  totalTested += r.tested; totalLost += r.lost; totalEnter += r.canEnterFort;
+  console.log(`  要塞 ${r.name}：${r.tested} 个省原本能打到，建城防后 ${r.lost} 个够不着、${r.canEnterFort} 个还能钻进要塞`);
 }
 check(`控制区没有制造任何「打不到的要塞」（穷举 ${totalTested} 个省·要塞组合）`, totalLost === 0,
   reach.filter(r => r.lost).map(r => r.name + ':' + r.lostIds).slice(0, 3));
+check('【核心】有城防后没有任何一个省能钻进要塞那一格', totalEnter === 0, totalEnter);
 
 /* ---- 控制区确实改变了路线（不是形同虚设） ---- */
 const blockedPath = run(`
@@ -319,8 +327,47 @@ const blockedPath = run(`
 check('确实存在被控制区挡住的具体走法（不是形同虚设）', !!blockedPath, blockedPath);
 if (blockedPath) console.log(`  例：${blockedPath.a} → ${blockedPath.b}（${blockedPath.name} 的外圈）被挡住`);
 
-/* ================= 6. 兵营：维护费减半 ================= */
-console.log('\n-- 6. 兵营减维护费 --');
+/* ================= 6. 【核心】端到端：站在外圈真的能把要塞打下来 ================= */
+console.log('\n-- 6. 【核心】站在外圈围攻要塞，直到攻克 --');
+const e2e = run(`
+  const A=countries.find(c=>c&&c.alive&&c.provList.length>10);
+  const B=countries.find(c=>c&&c.alive&&c.id!==A.id&&c.provList.length>10&&!atWar(A.id,c.id));
+  declareWar(B.id,A.id);
+  let F=0;
+  for(const pid of A.provList){
+    const p=provinces[pid]; if(!p||!p.pix.length||p.nbrs.length<3) continue;
+    if(p.nbrs.every(q=>provinces[q].owner!==B.id)){ F=pid; break; }
+  }
+  if(!F) return null;
+  const p=provinces[F];
+  p.fort=3;
+  const ring=p.nbrs.find(r=>provinces[r].pix.length);
+  armies=armies.filter(a=>a.owner!==B.id);
+  armies.push({id:91001,owner:B.id,prov:ring,str:20000,path:[],prog:0});
+  const target=siegeTargetFor(ring,B.id);
+  const ctrlBefore=p.controller;
+  let days=0, captured=false;
+  while(days<2000&&!captured){
+    resolveSieges(); days++;
+    if(p.controller===B.id) captured=true;
+  }
+  const res={ F, ring, targetIsFort:target===F, ctrlBefore, after:p.controller, days, captured };
+  armies=armies.filter(a=>a.id!==91001);
+  p.fort=0; p.controller=p.owner;
+  return res;
+`);
+if (!e2e) {
+  console.log('  SKIP  没找到合适的位置');
+} else {
+  console.log(`  要塞 #${e2e.F}：外圈省 #${e2e.ring} 上站了 2 万兵，${e2e.days} 天后攻破（城防 Lv3）`);
+  check('站在外圈时，围攻目标确实是那座要塞（不是脚下的省）', e2e.targetIsFort === true, e2e);
+  check('【核心】站在外圈真的能把要塞打下来', e2e.captured === true && e2e.after !== e2e.ctrlBefore, e2e);
+  check(`围城耗时 ${e2e.days} 天，落在「最短 60 天」的合理范围内`,
+    e2e.days >= 60 && e2e.days < 400, e2e.days);
+}
+
+/* ================= 7. 兵营：维护费减半 ================= */
+console.log('\n-- 7. 兵营减维护费 --');
 const up = run(`
   const A=countries.find(c=>c&&c.alive&&c.provList.length>6);
   const B=countries.find(c=>c&&c.alive&&c.id!==A.id);

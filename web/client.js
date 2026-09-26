@@ -1182,97 +1182,61 @@ function ensureLabels(){
   lctx.clearRect(0,0,cw,ch);
   drawLabels();
 }
-/* ---------- 国名贴图（完全附着在国土上） ----------
-   国名先按固定大小（40px）连同描边画进一张离屏小图并缓存；
-   上屏时把这张图**切成一列列竖条**，每一竖条按国土在该列的实际高度拉伸，
-   于是文字的形状就跟着国土的走势走，而且绝不会超出国土一像素 ——
-   不会飘到邻国，也不会飘到海上。 */
-const _labelTex=new Map();
-const LABEL_TEX_REF=40;
-function labelTexture(name){
-  let t=_labelTex.get(name);
-  if(t) return t;
-  const cv=document.createElement('canvas');
-  let g=cv.getContext('2d');
-  g.font='600 '+LABEL_TEX_REF+'px "Microsoft YaHei",sans-serif';
-  const w=Math.max(8,Math.ceil(g.measureText(name).width)+Math.ceil(LABEL_TEX_REF*0.5));
-  const h=Math.ceil(LABEL_TEX_REF*1.5);
-  cv.width=w; cv.height=h;          // 改尺寸会重置上下文状态，字体必须重设
-  g=cv.getContext('2d');
-  g.font='600 '+LABEL_TEX_REF+'px "Microsoft YaHei",sans-serif';
-  g.textAlign='center'; g.textBaseline='middle'; g.lineJoin='round';
-  g.lineWidth=Math.max(2,LABEL_TEX_REF*0.17); g.strokeStyle='rgba(0,0,0,0.78)';
-  g.strokeText(name,w/2,h/2);
-  g.fillStyle='#f2e8d2';
-  g.fillText(name,w/2,h/2);
-  t={cv,w,h};
-  if(_labelTex.size>300) _labelTex.clear();
-  _labelTex.set(name,t);
-  return t;
-}
-const LABEL_STRIP_MAX=46;             // 一个标签最多切多少条
-const MIN_LABEL_W=46;                 // 一条国名至少要占这么多屏幕像素才画
-const LABEL_STRETCH_MAX=2.2;          // 横向最多拉伸到原始宽度的多少倍
-/* 把一个国名标签「压」到它那一片国土上：
-   文字横向摊在这条带子里，纵向逐列贴合国土的高度与走势。
-   字号只由国土面积决定，横向拉伸有上限 —— 不然会拉成一团糊。 */
-function drawWarpedLabel(cc,lb,faint){
-  const tex=labelTexture(cc.name);
-  // 世界东西环绕：取离相机最近的那一份
-  const mid=(lb.x0+lb.x1)/2;
-  const shiftX=COLS*Math.round((cam.x-mid)/COLS);
-  const spanX=lb.x1-lb.x0+1;
-  const sx0=(lb.x0+shiftX-cam.x)*cam.z+cw/2;
-  const W=spanX*cam.z;
-  if(W<MIN_LABEL_W) return false;
-  const sx1=sx0+W;
-  if(sx1<-40||sx0>cw+40) return false;
-  // 字号先按国土面积定，再压到「这条带子塞得下」为止 ——
-  // 只允许横向拉伸，绝不允许横向压缩，不然字会挤成一团
-  const perPx=tex.w/LABEL_TEX_REF;
-  let fontPx=Math.max(9,Math.min(34,labelFontOf(lb.comp)));
-  fontPx=Math.max(8,Math.min(fontPx,(W*0.92)/perPx));
-  const natW=tex.w*fontPx/LABEL_TEX_REF;
-  let destW=Math.min(W*0.94, natW*LABEL_STRETCH_MAX);
-  // 兜底：万一量出来的文字宽度异常（字体还没就绪、画布桩之类），
-  // 宁可多拉长一点也别整个国名都不画
-  if(destW<MIN_LABEL_W) destW=Math.min(W*0.94, MIN_LABEL_W*1.6);
-  if(destW<10) return false;
-  const x0=sx0+(W-destW)/2;               // 在自己的带子里居中，绝不越出这条带
-  const strips=Math.max(6,Math.min(64,Math.ceil(destW/5)));
-  const step=spanX/strips;
-  if(faint) lctx.globalAlpha=0.42;
-  for(let i=0;i<strips;i++){
-    const ca=lb.x0+i*step, cb=lb.x0+(i+1)*step;
-    let rTop=32767, rBot=-1;
-    const k0=Math.max(0,Math.floor(ca)-lb.c0), k1=Math.min(lb.top.length-1,Math.ceil(cb)-lb.c0);
-    for(let k=k0;k<=k1;k++){ if(lb.top[k]<rTop) rTop=lb.top[k]; if(lb.bot[k]>rBot) rBot=lb.bot[k]; }
-    if(rBot<0||rTop>rBot) continue;
-    const syT=(rTop-cam.y)*cam.z+ch/2;
-    const syB=(rBot+1-cam.y)*cam.z+ch/2;
-    const avail=syB-syT;
-    if(avail<2) continue;
-    const th=Math.max(fontPx*0.5, Math.min(avail*0.80, fontPx*1.5));
-    const cy=(syT+syB)/2;
-    const f0=(ca-lb.x0)/spanX, f1=(cb-lb.x0)/spanX;
-    const xa=x0+f0*destW, xb=x0+f1*destW;
-    lctx.drawImage(tex.cv, f0*tex.w, 0, Math.max(1,(f1-f0)*tex.w), tex.h,
-                   xa, cy-th/2, Math.max(1,xb-xa)+0.7, th);
+/* 一片国土一个国名：按国土主轴的角度斜着写上去，字号尽量填满这片地。
+   不逐列贴边、不扭曲字形 —— 就是图里那种「微微斜着摆、盖在国土上」的样子。 */
+const MIN_LABEL_W=44;                 // 一条国名至少要占这么多屏幕像素才画
+const MIN_LABEL_FONT=8;               // 字号小到这个地步就说明这片地根本写不下，干脆不画
+function drawCountryLabel(cc,lb,faint){
+  const N=cc.name.length||1;
+  // 字能写多大：横向要放得下 N 个字，纵向不能超出这片地的半高。
+  // 这里全换算成**屏幕像素**（乘 cam.z）—— 放得越大，能显示名字的国家就越多。
+  // 两个系数是「容差」：留点余量，名字才不会顶到国境线上。
+  const byLen=lb.len*cam.z*0.84/(N*1.04);
+  const byH=lb.half*cam.z*0.82;
+  let fontPx=Math.min(byLen, byH);
+  // 小比例尺下再用面积压一道：国土大国名大、国土小国名小
+  if(cam.z<3.2) fontPx=Math.min(fontPx, Math.max(10,Math.min(30,labelFontOf(lb.comp))));
+  fontPx=Math.min(fontPx, 34);
+  if(fontPx<MIN_LABEL_FONT) return false;     // 地太小，写不下就不写
+  const w=N*fontPx*1.04, h=fontPx*1.45;
+  // 世界东西环绕：x 取离相机最近的那一份
+  const sx0=(nearX(lb.x) - cam.x)*cam.z+cw/2, sy0=(lb.y - cam.y)*cam.z+ch/2;
+  const sw=w*cam.z, sh=h*cam.z;
+  if(sx0+sw/2<-20||sx0-sw/2>cw+20||sy0+sh<-20||sy0-sh>ch+20) return false;
+  if(sw<MIN_LABEL_W) return false;
+  // 用 setTransform 直接摆这个倾斜的文字坐标系（不用 save/rotate/restore，
+  // 那样要求画布桩实现整套变换栈，测试环境里不一定有）
+  const ca=Math.cos(lb.ang), sa=Math.sin(lb.ang);
+  lctx.setTransform(dpr*ca, dpr*sa, -dpr*sa, dpr*ca, dpr*sx0, dpr*sy0);
+  lctx.font='600 '+fontPx.toFixed(1)+'px "Microsoft YaHei",sans-serif';
+  lctx.textAlign='center'; lctx.textBaseline='middle';
+  lctx.lineJoin='round';
+  if(faint){
+    lctx.globalAlpha=0.42;
+    lctx.fillStyle='#f2e8d2';
+    lctx.fillText(cc.name,0,0);
+  } else {
+    lctx.lineWidth=Math.max(2.5,fontPx*0.20);
+    lctx.strokeStyle='rgba(0,0,0,0.78)';
+    lctx.strokeText(cc.name,0,0);
+    lctx.fillStyle='#f2e8d2';
+    lctx.fillText(cc.name,0,0);
   }
-  if(faint) lctx.globalAlpha=1;
+  lctx.globalAlpha=1;
+  lctx.setTransform(dpr,0,0,dpr,0,0);        // 还原成标签层的常规变换
   return true;
 }
 function drawLabels(){
   lctx.textAlign='center';
   if(cam.z<3.6){
-    // 国名完全贴合国土的走向；缩放决定多小的国家才配露脸
+    // 国名顺着国土的走向摆；缩放决定多小的国家才配露脸
     const minArea=labelMinArea(cam.z);
     for(let c=1;c<countries.length;c++){
       const cc=countries[c];
       if(!cc||!cc.alive||!cc.labels||!cc.labels.length) continue;
       for(const lb of cc.labels){
         if(lb.comp<minArea) continue;
-        if(drawWarpedLabel(cc,lb,false)) _labelHasContent=true;
+        if(drawCountryLabel(cc,lb,false)) _labelHasContent=true;
       }
     }
   } else {
@@ -1283,7 +1247,7 @@ function drawLabels(){
       if(!cc||!cc.alive||!cc.labels||!cc.labels.length) continue;
       const lb=cc.labels[0];
       if(!lb||lb.comp<minArea) continue;
-      if(drawWarpedLabel(cc,lb,true)) _labelHasContent=true;
+      if(drawCountryLabel(cc,lb,true)) _labelHasContent=true;
     }
     lctx.font='10px "Microsoft YaHei",sans-serif';
     lctx.lineWidth=2; lctx.strokeStyle='rgba(0,0,0,0.6)'; lctx.fillStyle='rgba(235,225,200,0.8)';
