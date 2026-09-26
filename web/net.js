@@ -428,13 +428,17 @@ function mpDelta(m) {
     }
   }
   if (d.bl) {
-    // 建筑：兵营 0/1、城防等级。城防要重画地图模型，所以顺带把本省重绘一遍
+    // 建筑：兵营 0/1、城防等级、在建工程(1兵营/2城防)、剩余天数
     for (const row of d.bl) {
       const p = provinces[row[0]];
       if (!p) continue;
       const oldFort = p.fort || 0;
       p.barracks = row[1] ? 1 : 0;
       p.fort = row[2] || 0;
+      p.buildKind = row[3] === 1 ? 'barracks' : (row[3] === 2 ? 'fort' : '');
+      p.buildDays = row[4] || 0;
+      if (p.buildDays > (p.buildTotal || 0)) p.buildTotal = p.buildDays;
+      if (p.buildDays === 0) p.buildTotal = 0;
       if (p.fort !== oldFort) {
         if (typeof _bldEpoch !== 'undefined') _bldEpoch++;
         if (typeof recolorProvAndNbrs === 'function') recolorProvAndNbrs(p.id);

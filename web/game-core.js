@@ -25,24 +25,38 @@ const SIEGE_DIV=3000;                         // 围城速率除数
    数值都集中在这里，方便调平衡。 */
 const FORT_MAX=5;                             // 城防最高等级
 const FORT_GARRISON=1000;                     // 每级驻军人数
-const FORT_DAMP=1.2;                          // 城防对围城速度的压制系数
-const FORT_LUCK=0.45;                         // 围城每日运气幅度（±45%）
-const FORT_MIN_DAMP=0.05;                     // 压制下限：再弱的攻方也总能慢慢磨
+const FORT_SIEGE_FACTOR=0.6;                  // 每级城防让围城速度除以 (1+等级×这个数)
+const FORT_MAX_ADV=8;                         // 攻城兵力最多按「驻军×8」算，人再多也不更快
+const FORT_LUCK=0.35;                         // 围城每日运气幅度（±35%）
+/* 每级城防的**最短**围城天数 —— 硬下限，与兵力无关：
+   一座城堡至少也要拖住敌人一两个月，堆多少人马都不能更快。 */
+const FORT_MIN_DAYS=[0,30,45,60,75,90];
+const FORT_MIN_FRAC=0.10;                     // 最慢也只有最短工期的 10 倍（弱旅也能磨下来）
 const BARRACKS_COST=150;
+const BARRACKS_DAYS=90;                       // 兵营工期（3 个月）
 const BARRACKS_UPKEEP_MUL=0.5;                // 兵营里驻扎军队的维护费倍率
 const FORT_COST=[0,200,280,380,500,650];      // 升到第 n 级的花费
+const FORT_DAYS=[0,180,240,300,360,420];      // 升到第 n 级的工期（6~14 个月）
 const BUILD_NAMES={barracks:'兵营',fort:'城防'};
 
 function ensureProvinceBuildings(p){
   if(!p) return p;
   if(typeof p.fort!=='number'||!isFinite(p.fort)||p.fort<0) p.fort=0;
   if(typeof p.barracks!=='number'||!isFinite(p.barracks)) p.barracks=0;
+  if(p.buildKind!=='barracks'&&p.buildKind!=='fort') p.buildKind='';
+  if(typeof p.buildDays!=='number'||!isFinite(p.buildDays)||p.buildDays<0) p.buildDays=0;
+  if(typeof p.buildTotal!=='number'||!isFinite(p.buildTotal)||p.buildTotal<0) p.buildTotal=0;
   return p;
 }
 function garrisonOf(p){ return p&&p.fort>0?p.fort*FORT_GARRISON:0; }
 function buildCost(p,kind){
   if(kind==='barracks') return p.barracks?0:BARRACKS_COST;
   if(kind==='fort') return p.fort>=FORT_MAX?0:(FORT_COST[p.fort+1]||0);
+  return 0;
+}
+function buildDays(p,kind){
+  if(kind==='barracks') return BARRACKS_DAYS;
+  if(kind==='fort') return FORT_DAYS[p.fort+1]||0;
   return 0;
 }
 const RECRUIT_DAYS=365;                       // 陆军集结周期（1 年）
@@ -406,17 +420,13 @@ function recomputeCap(c){
 }
 function totalDev(c){ let d=0; for(const pid of c.provList){ const p=provinces[pid]; d+=p.tax+p.prod+p.man; } return d; }
 /* ---------- 国名标签 ----------
-   按「陆路连通块」分块：本土一块，每一块飞地各算一块 —— 飞地上也会显示国名。
-   每块的字号按自己的面积来（国土大国名大、飞地小国名小），
-   块越大给的标签份数越多，在一张粗网格上均匀撒点，
-   国名就铺满整片国土，而不是全挤在一个质心上。
-   撒点用预分配的定长网格数组，不建 Map，免得每次重算都产生垃圾。 */
-const LBL_CELL=26;
-const LBL_GW=Math.ceil(COLS/LBL_CELL), LBL_GH=Math.ceil(ROWS/LBL_CELL);
-const LBL_SEP=95;                     // 同名标签之间的最小间距
-const _lblN=new Int32Array(LBL_GW*LBL_GH);
-const _lblX=new Float64Array(LBL_GW*LBL_GH);
-const _lblY=new Float64Array(LBL_GW*LBL_GH);
+   要做到「字完全附着在国土上、形状走势跟着国土走」，光有一个锚点是不够的：
+   得知道国土在**每一列**的上下边沿。所以每个陆路连通块都算一份 top/bot 数组
+   （第 k 列的最上与最下行），渲染时把文字切成一列列竖条，
+   每一条按当列的实际高度拉伸 —— 字就再也不会飘到邻国或海上去了。
+   飞地是独立的连通块，所以飞地上也会有自己的国名。 */
+const LBL_BAND_W=300;                 // 一条带大概多少列（宽的国土就切几条，带之间不重叠）
+const LBL_BAND_MAX=3;
 /* 字号：面积开方乘个斜率 —— 面积差 100 倍，字号才差 10 倍，看着才自然 */
 function labelFontOf(area){ return Math.max(9,Math.min(26,Math.sqrt(area)*0.30+7)); }
 /* 各比例尺下最低显示到多大的国土（越小越晚出现） */
@@ -427,10 +437,12 @@ function labelMinArea(z){
   if(z<4.6) return 260;
   return 0;
 }
+/* 国名标签的几何：每个连通块一份「每一列的最上/最下行」，
+   渲染时把文字切竖条、逐列贴到国土的实际高度上，字就完全附着了。 */
 function rebuildLabels(){
   for(let c=1;c<countries.length;c++){
     const cc=countries[c];
-    if(!cc||!cc.alive){ if(cc){ cc.lx=0; cc.ly=0; cc.labels=[]; } continue; }
+    if(!cc||!cc.alive){ if(cc){ cc.lx=0; cc.ly=0; cc.labels=[]; cc.labelPx=0; } continue; }
     // 1) 按邻接把国土切成连通块（只走同属本国的省）
     const seen=new Set(), comps=[];
     for(const pid of cc.provList){
@@ -450,46 +462,47 @@ function rebuildLabels(){
       }
       comps.push(comp);
     }
-    // 2) 每块一次像素遍历：累计面积，并丢进粗网格
     cc.labels=[]; cc.labelPx=0;
     let bestArea=-1, bx=0, by=0;
     for(let ci=0;ci<comps.length;ci++){
       const comp=comps[ci];
-      let area=0, touched=null;
+      // 2) 列范围 + 面积
+      let c0=1<<30, c1=-1, area=0;
+      for(const pid of comp){
+        const p=provinces[pid];
+        for(const px of p.pix){ const col=px%COLS; if(col<c0)c0=col; if(col>c1)c1=col; area++; }
+      }
+      if(!area||c1<c0) continue;
+      cc.labelPx+=area;
+      const W=c1-c0+1;
+      const top=new Int16Array(W).fill(32767), bot=new Int16Array(W).fill(-1);
+      // 3) 每一列的最上与最下行 —— 这就是「国土的形状」
+      let sx=0, sy=0;
       for(const pid of comp){
         const p=provinces[pid];
         for(const px of p.pix){
-          const r=(px/COLS)|0, col=px%COLS;
-          const gi=((r/LBL_CELL)|0)*LBL_GW+((col/LBL_CELL)|0);
-          if(_lblN[gi]===0){ if(!touched) touched=[]; touched.push(gi); }
-          _lblN[gi]++; _lblX[gi]+=col+0.5; _lblY[gi]+=r+0.5;
-          area++;
+          const r=(px/COLS)|0, col=px%COLS, k=col-c0;
+          if(r<top[k]) top[k]=r;
+          if(r>bot[k]) bot[k]=r;
+          sx+=col+0.5; sy+=r+0.5;
         }
       }
-      if(!area){ if(touched) for(const gi of touched) _lblN[gi]=0; continue; }
-      cc.labelPx+=area;
-      // 3) 撒点：格内像素多的优先，彼此至少隔开 LBL_SEP
-      const cand=[];
-      for(const gi of touched) cand.push(gi);
-      cand.sort((a,b)=>_lblN[b]-_lblN[a]);
-      const want=Math.max(1,Math.min(8,Math.round(Math.sqrt(area)/55)));
-      const picked=[];
-      for(const gi of cand){
-        if(picked.length>=want) break;
-        const x=_lblX[gi]/_lblN[gi], y=_lblY[gi]/_lblN[gi];
-        let ok=true;
-        for(const q of picked) if(Math.hypot(q[0]-x,q[1]-y)<LBL_SEP){ ok=false; break; }
-        if(ok) picked.push([x,y]);
+      if(area>bestArea){ bestArea=area; bx=sx/area; by=sy/area; }
+      // 4) 沿着列切成几条带，每条带各画一遍国名（宽国土上名字就铺开了）
+      const bands=Math.max(1,Math.min(LBL_BAND_MAX,Math.round(W/LBL_BAND_W)));
+      const bw=Math.ceil(W/bands);
+      for(let b=0;b<bands;b++){
+        const x0=c0+b*bw, x1=Math.min(c1,x0+bw-1);
+        if(x1<x0) continue;
+        let t=32767, bo=-1;
+        for(let k=x0-c0;k<=x1-c0;k++){ if(top[k]<t)t=top[k]; if(bot[k]>bo)bo=bot[k]; }
+        if(bo<0||t>bo) continue;
+        cc.labels.push({ x0, x1, c0, top, bot, comp:area,
+                         band:area*(x1-x0+1)/W, rows:bo-t+1, cols:x1-x0+1, ci });
       }
-      for(const [x,y] of picked) cc.labels.push([x,y,area,labelFontOf(area),ci]);
-      if(area>bestArea){ bestArea=area; bx=0; by=0; let n=0;
-        for(const gi of touched){ bx+=_lblX[gi]; by+=_lblY[gi]; n+=_lblN[gi]; }
-        if(n){ bx/=n; by/=n; } }
-      for(const gi of touched) { _lblN[gi]=0; _lblX[gi]=0; _lblY[gi]=0; }
     }
-    // 大的块排前面：小比例尺下只取第一个，取到的就是本土那块最大的标签
-    cc.labels.sort((a,b)=>b[2]-a[2]);
-    // 4) lx/ly 保留成「最大那块的中心」，别处（相机、军团落点）还在用
+    // 大块排前面：小比例尺下只取第一个，取到的就是本土那块最大的
+    cc.labels.sort((a,b)=>b.comp-a.comp);
     if(bestArea>=0){ cc.lx=bx; cc.ly=by; }
     else if(!cc.lx){ cc.lx=0; cc.ly=0; }
   }
@@ -1065,6 +1078,7 @@ function tickRecruits(){
 function tickDay(){
   if(_aiPending){ _aiPending=false; aiMonthly(); }
   tickRecruits();
+  tickBuild();
   // 1) 行军（战斗中的军队锁定）
   for(const a of armies){
     if(a.isNavy){
@@ -1174,18 +1188,29 @@ function resolveBattles(){
 }
 
 /* ---------- 围城 ----------
-   每日进度 = 攻方兵力 / SIEGE_DIV × 城防压制 × 运气
+   每日进度 = 攻方兵力 / SIEGE_DIV / 城防倍率 × 运气
 
-   城防压制 = 攻方兵力 / (攻方兵力 + 驻军 × FORT_DAMP)
+   城防倍率 = 1 + 等级 × FORT_SIEGE_FACTOR
      · 没有城防时恒等于 1，和以前完全一样
-     · 攻方越薄、城防越高，压制越狠：2000 人围 3 级城防只有 0.36 的效率
-     · 有下限 FORT_MIN_DAMP，人再少也能慢慢磨，不会永远打不动
-   运气 = 1 ± FORT_LUCK，每天摇一次 —— 围城本来就该有点偶然性。 */
+     · Lv5 是 6.5 倍工期 —— 这是**与兵力无关的硬减速**，堆多少人马都绕不过去
+
+   攻城兵力有上限：effStr = min(兵力, 驻军 × FORT_MAX_ADV)
+     · 这就是「不是人多到一定程度就能突破」：Lv5 驻军 5000，攻城效率最多按 4 万人算，
+       再堆 10 万 20 万也不会更快，只能靠时间磨
+   每日进度有上限 100/FORT_MIN_DAYS[等级] —— 即「最短围城天数」，
+   一座城堡至少拖住 1~3 个月，多少兵马都一样：Lv1 三十天、Lv3 六十天、Lv5 九十天。
+   下限是最短工期的 10 倍，弱旅也能慢慢磨下来，不会出现永远 0 的僵局。
+   运气 = 1 ± FORT_LUCK，每天摇一次。 */
 function siegeDailyProgress(bstr,p){
-  const gar=garrisonOf(p);
-  const damp=gar>0?Math.max(FORT_MIN_DAMP, bstr/(bstr+gar*FORT_DAMP)):1;
+  const lv=p&&p.fort>0?p.fort:0;
   const luck=1+FORT_LUCK*(rnd()*2-1);
-  return (bstr/SIEGE_DIV)*damp*luck;
+  if(!lv) return (bstr/SIEGE_DIV)*luck;       // 无城防：与旧版完全一致
+  const gar=garrisonOf(p);
+  const eff=Math.min(bstr, gar*FORT_MAX_ADV);
+  const cap=100/Math.max(1,FORT_MIN_DAYS[lv]||30);
+  const floor=cap*FORT_MIN_FRAC;
+  const rate=(eff/SIEGE_DIV)/(1+lv*FORT_SIEGE_FACTOR)*luck;
+  return Math.min(cap, Math.max(floor, rate));
 }
 function resolveSieges(){
   const byProv=new Map();
@@ -1274,6 +1299,7 @@ function economy(c){
 function countryStrength(cid){ let s=0; for(const a of armies) if(a.owner===cid) s+=a.str; return s; }
 
 /* ---------- 建造 ----------
+   下单只扣钱、开工；真正建成要等工期走完（见 tickBuild）。
    返回 null 表示成功，否则返回一句给玩家看的原因。 */
 function buildBuilding(cid,pid,kind){
   const c=countries[cid];
@@ -1283,21 +1309,75 @@ function buildBuilding(cid,pid,kind){
   if(p.owner!==cid) return '只能在自己的领土上建造';
   if(p.controller!==cid) return '本省不在你控制之下';
   if(kind!=='barracks'&&kind!=='fort') return '未知的建筑';
+  ensureProvinceBuildings(p);
+  if(p.buildKind) return `本省正在修建${BUILD_NAMES[p.buildKind]}（还剩 ${Math.ceil(p.buildDays/30)} 个月）`;
   if(kind==='barracks'&&p.barracks) return '本省已有兵营';
   if(kind==='fort'&&p.fort>=FORT_MAX) return `城防已达最高等级 Lv.${FORT_MAX}`;
   const cost=buildCost(p,kind);
   if(cost<=0) return '这里不能再建了';
   if(c.gold<cost) return `金币不足（需要 ${cost}）`;
   c.gold-=cost;
-  if(kind==='barracks') p.barracks=1;
-  else {
-    p.fort++;
-    UI.recolorNbrs(pid);          // 城防要立刻画出新模型
-  }
+  const days=buildDays(p,kind);
+  p.buildKind=kind; p.buildDays=days; p.buildTotal=days;
   UI.panel();
-  const nm=kind==='barracks'?'兵营':`城防 Lv.${p.fort}`;
-  if(isHuman(cid)) pushLog(`🏗 ${p.name} 建成了 ${nm}`,'gold',cid);
+  if(isHuman(cid)) pushLog(`🏗 ${p.name} 开工修建 ${BUILD_NAMES[kind]}（${Math.ceil(days/30)} 个月）`,'gold',cid);
   return null;
+}
+/* 拆除：兵营拆掉、城防降一级。退还一半造价，立即生效。
+   正在施工的工地也可以直接取消（退一半钱）。 */
+function demolishBuilding(cid,pid,kind){
+  const c=countries[cid];
+  if(!c||!c.alive) return '国家不存在';
+  const p=provinces[pid];
+  if(!p||!p.pix.length) return '没有这个省份';
+  if(p.owner!==cid) return '只能拆自己的建筑';
+  if(p.controller!==cid) return '本省不在你控制之下';
+  ensureProvinceBuildings(p);
+  let refund=0, what='';
+  if(kind==='cancel'){
+    if(!p.buildKind) return '本省没有在建工程';
+    refund=Math.floor(buildCost(p,p.buildKind)*0.5);
+    what=`${BUILD_NAMES[p.buildKind]}工地`;
+    p.buildKind=''; p.buildDays=0; p.buildTotal=0;
+  } else if(kind==='barracks'){
+    if(!p.barracks) return '本省没有兵营';
+    refund=Math.floor(BARRACKS_COST*0.5);
+    what='兵营';
+    p.barracks=0;
+  } else if(kind==='fort'){
+    if(p.fort<=0) return '本省没有城防';
+    refund=Math.floor((FORT_COST[p.fort]||0)*0.5);
+    what=`城防 Lv.${p.fort}`;
+    p.fort--;
+  } else return '未知的建筑';
+  c.gold+=refund;
+  UI.recolorNbrs(pid);          // 城防模型要跟着变
+  UI.panel();
+  if(isHuman(cid)) pushLog(`🧨 ${p.name} 拆除了 ${what}${refund?`（退回 ${refund} 金）`:''}`,'gold',cid);
+  return null;
+}
+/* 每日推进工期：完工那一刻才真的把建筑加上 */
+function tickBuild(){
+  for(let i=1;i<provinces.length;i++){
+    const p=provinces[i];
+    if(!p||!p.buildKind||!p.pix.length) continue;
+    // 工地被人占了就停工作废（和征兵一个道理），免得给敌人修城防
+    if(p.controller!==p.owner){
+      if(isHuman(p.owner)) pushLog(`🏗 ${p.name} 的${BUILD_NAMES[p.buildKind]}工地因本省易主而废弃`,'war',p.owner);
+      p.buildKind=''; p.buildDays=0; p.buildTotal=0;
+      UI.recolorNbrs(p.id);
+      continue;
+    }
+    p.buildDays--;
+    if(p.buildDays>0) continue;
+    const kind=p.buildKind;
+    p.buildKind=''; p.buildDays=0; p.buildTotal=0;
+    if(kind==='barracks') p.barracks=1;
+    else p.fort=Math.min(FORT_MAX,p.fort+1);
+    UI.recolorNbrs(p.id);           // 城防要立刻换成要塞模型
+    UI.panel();
+    if(isHuman(p.owner)) pushLog(`🏗 ${p.name} 的${kind==='barracks'?'兵营':`城防 Lv.${p.fort}`}落成`,'gold',p.owner);
+  }
 }
 
 function aiMonthly(){
@@ -2350,11 +2430,11 @@ function buildWorld(){
 /* 当前世界的可序列化快照 */
 function makeSaveData(){
   return {v:1,dayCount,cal:{...cal},player,paused,speed,mapMode,
-    // [5] 是故土记录 former：复国之机靠它，必须一起存/传
-    // [6][7] 是城防等级 / 兵营：建筑也得进存档
-    prov:provinces.slice(1).map(p=>p.former&&p.former.length
-      ?[p.owner,p.controller,p.tax,p.prod,p.man,p.former.slice(),p.fort||0,p.barracks||0]
-      :[p.owner,p.controller,p.tax,p.prod,p.man,0,p.fort||0,p.barracks||0]),
+    // [5] 是故土记录 former，[6][7] 城防等级 / 兵营，[8][9] 在建工程与剩余天数
+    prov:provinces.slice(1).map(p=>[p.owner,p.controller,p.tax,p.prod,p.man,
+      p.former&&p.former.length?p.former.slice():0,
+      p.fort||0,p.barracks||0,
+      p.buildKind==='barracks'?1:(p.buildKind==='fort'?2:0), p.buildDays||0]),
     ct:countries.slice(1).map(c=>c?(c.featId==='CUSTOM'
       ?{a:c.alive?1:0,g:Math.round(c.gold*10)/10,mp:Math.round(c.mp),r:c.ruler,ov:c.overlord||0,al:(c.allies||[]).slice(),n:c.name,col:c.color,cap:c.capital,sj:c.subject||0}
       :{a:c.alive?1:0,g:Math.round(c.gold*10)/10,mp:Math.round(c.mp),r:c.ruler,ov:c.overlord||0,al:(c.allies||[]).slice(),sj:c.subject||0}):null),
@@ -2368,7 +2448,14 @@ function makeSaveData(){
 /* 把快照写回当前世界（纯状态，不触碰界面） */
 function applySaveData(d){
   wars=d.wars||[]; truces=d.truces||{};
-  d.prov.forEach((a,i)=>{ const p=provinces[i+1]; if(!p) return; p.owner=a[0];p.controller=a[1];p.tax=a[2];p.prod=a[3];p.man=a[4];p.siege=0; p.former=a[5]?a[5].slice():[]; p.fort=a[6]||0; p.barracks=a[7]||0; });
+  d.prov.forEach((a,i)=>{
+    const p=provinces[i+1]; if(!p) return;
+    p.owner=a[0];p.controller=a[1];p.tax=a[2];p.prod=a[3];p.man=a[4];p.siege=0;
+    p.former=Array.isArray(a[5])?a[5].slice():[];
+    p.fort=a[6]||0; p.barracks=a[7]||0;
+    p.buildKind=a[8]===1?'barracks':(a[8]===2?'fort':'');
+    p.buildDays=a[9]||0; p.buildTotal=p.buildDays;
+  });
   d.ct.forEach((a,i)=>{
     if(!a) return;
     const id=i+1;
@@ -2458,8 +2545,10 @@ if(typeof module!=='undefined'&&module.exports){
     rotateWorld,MAP_SHIFT,pruneTinyIslands,TINY_ISLAND_PIX,wrapWorldX,nearestWorldX,
     worldDecode,worldMakeLand,worldMakeProvinces,worldMakeCountries,
     labelFontOf,labelMinArea,
-    FORT_MAX,FORT_GARRISON,FORT_DAMP,FORT_LUCK,BARRACKS_COST,FORT_COST,BUILD_NAMES,
-    ensureProvinceBuildings,garrisonOf,buildCost,buildBuilding,zocMapFor,zocAllows,siegeDailyProgress,
+    FORT_MAX,FORT_GARRISON,FORT_SIEGE_FACTOR,FORT_MAX_ADV,FORT_LUCK,FORT_MIN_DAYS,FORT_MIN_FRAC,
+    BARRACKS_COST,BARRACKS_DAYS,FORT_COST,FORT_DAYS,BUILD_NAMES,
+    ensureProvinceBuildings,garrisonOf,buildCost,buildDays,buildBuilding,demolishBuilding,tickBuild,
+    zocMapFor,zocAllows,siegeDailyProgress,
     tickDay,advanceDay,mergeArmies,resolveBattles,resolveSieges,monthlyTick,economy,aiMonthly,
     declareWar,makePeace,transferProvince,checkDeath,vassalize,releaseStaleOccupations,
     warScore,peaceCost,releaseCost,canDemandProvince,occRatio,atWar,inWar,truceBetween,truceKey,

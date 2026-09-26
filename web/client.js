@@ -1182,64 +1182,121 @@ function ensureLabels(){
   lctx.clearRect(0,0,cw,ch);
   drawLabels();
 }
+/* ---------- 国名贴图（完全附着在国土上） ----------
+   国名先按固定大小（40px）连同描边画进一张离屏小图并缓存；
+   上屏时把这张图**切成一列列竖条**，每一竖条按国土在该列的实际高度拉伸，
+   于是文字的形状就跟着国土的走势走，而且绝不会超出国土一像素 ——
+   不会飘到邻国，也不会飘到海上。 */
+const _labelTex=new Map();
+const LABEL_TEX_REF=40;
+function labelTexture(name){
+  let t=_labelTex.get(name);
+  if(t) return t;
+  const cv=document.createElement('canvas');
+  let g=cv.getContext('2d');
+  g.font='600 '+LABEL_TEX_REF+'px "Microsoft YaHei",sans-serif';
+  const w=Math.max(8,Math.ceil(g.measureText(name).width)+Math.ceil(LABEL_TEX_REF*0.5));
+  const h=Math.ceil(LABEL_TEX_REF*1.5);
+  cv.width=w; cv.height=h;          // 改尺寸会重置上下文状态，字体必须重设
+  g=cv.getContext('2d');
+  g.font='600 '+LABEL_TEX_REF+'px "Microsoft YaHei",sans-serif';
+  g.textAlign='center'; g.textBaseline='middle'; g.lineJoin='round';
+  g.lineWidth=Math.max(2,LABEL_TEX_REF*0.17); g.strokeStyle='rgba(0,0,0,0.78)';
+  g.strokeText(name,w/2,h/2);
+  g.fillStyle='#f2e8d2';
+  g.fillText(name,w/2,h/2);
+  t={cv,w,h};
+  if(_labelTex.size>300) _labelTex.clear();
+  _labelTex.set(name,t);
+  return t;
+}
+const LABEL_STRIP_MAX=46;             // 一个标签最多切多少条
+const MIN_LABEL_W=46;                 // 一条国名至少要占这么多屏幕像素才画
+const LABEL_STRETCH_MAX=2.2;          // 横向最多拉伸到原始宽度的多少倍
+/* 把一个国名标签「压」到它那一片国土上：
+   文字横向摊在这条带子里，纵向逐列贴合国土的高度与走势。
+   字号只由国土面积决定，横向拉伸有上限 —— 不然会拉成一团糊。 */
+function drawWarpedLabel(cc,lb,faint){
+  const tex=labelTexture(cc.name);
+  // 世界东西环绕：取离相机最近的那一份
+  const mid=(lb.x0+lb.x1)/2;
+  const shiftX=COLS*Math.round((cam.x-mid)/COLS);
+  const spanX=lb.x1-lb.x0+1;
+  const sx0=(lb.x0+shiftX-cam.x)*cam.z+cw/2;
+  const W=spanX*cam.z;
+  if(W<MIN_LABEL_W) return false;
+  const sx1=sx0+W;
+  if(sx1<-40||sx0>cw+40) return false;
+  // 字号先按国土面积定，再压到「这条带子塞得下」为止 ——
+  // 只允许横向拉伸，绝不允许横向压缩，不然字会挤成一团
+  const perPx=tex.w/LABEL_TEX_REF;
+  let fontPx=Math.max(9,Math.min(34,labelFontOf(lb.comp)));
+  fontPx=Math.max(8,Math.min(fontPx,(W*0.92)/perPx));
+  const natW=tex.w*fontPx/LABEL_TEX_REF;
+  let destW=Math.min(W*0.94, natW*LABEL_STRETCH_MAX);
+  // 兜底：万一量出来的文字宽度异常（字体还没就绪、画布桩之类），
+  // 宁可多拉长一点也别整个国名都不画
+  if(destW<MIN_LABEL_W) destW=Math.min(W*0.94, MIN_LABEL_W*1.6);
+  if(destW<10) return false;
+  const x0=sx0+(W-destW)/2;               // 在自己的带子里居中，绝不越出这条带
+  const strips=Math.max(6,Math.min(64,Math.ceil(destW/5)));
+  const step=spanX/strips;
+  if(faint) lctx.globalAlpha=0.42;
+  for(let i=0;i<strips;i++){
+    const ca=lb.x0+i*step, cb=lb.x0+(i+1)*step;
+    let rTop=32767, rBot=-1;
+    const k0=Math.max(0,Math.floor(ca)-lb.c0), k1=Math.min(lb.top.length-1,Math.ceil(cb)-lb.c0);
+    for(let k=k0;k<=k1;k++){ if(lb.top[k]<rTop) rTop=lb.top[k]; if(lb.bot[k]>rBot) rBot=lb.bot[k]; }
+    if(rBot<0||rTop>rBot) continue;
+    const syT=(rTop-cam.y)*cam.z+ch/2;
+    const syB=(rBot+1-cam.y)*cam.z+ch/2;
+    const avail=syB-syT;
+    if(avail<2) continue;
+    const th=Math.max(fontPx*0.5, Math.min(avail*0.80, fontPx*1.5));
+    const cy=(syT+syB)/2;
+    const f0=(ca-lb.x0)/spanX, f1=(cb-lb.x0)/spanX;
+    const xa=x0+f0*destW, xb=x0+f1*destW;
+    lctx.drawImage(tex.cv, f0*tex.w, 0, Math.max(1,(f1-f0)*tex.w), tex.h,
+                   xa, cy-th/2, Math.max(1,xb-xa)+0.7, th);
+  }
+  if(faint) lctx.globalAlpha=1;
+  return true;
+}
 function drawLabels(){
   lctx.textAlign='center';
-  /* 标签防叠：文字是画在一张带透明通道的层上的，重叠了就是一团糊。
-     每画一个就把它占的矩形记下来，后来的压上去就跳过。
-     小比例尺下每个国家只留最大的那块国土的标签（不然俄罗斯会同时冒好几个）。 */
-  const boxes=[];
-  const fits=(x,y,w,h)=>{
-    const x0=x-w/2, x1=x+w/2, y0=y-h*0.8, y1=y+h*0.3;
-    for(let i=0;i<boxes.length;i++){
-      const b=boxes[i];
-      if(x0<b[2]&&x1>b[0]&&y0<b[3]&&y1>b[1]) return false;
-    }
-    boxes.push([x0,y0,x1,y1]);
-    return true;
-  };
-  const onePerCountry = cam.z<2.0;
   if(cam.z<3.6){
-    // 国名：一块国土一个（或几个）标签。字号随国土面积走，缩放决定最小的那个露不露脸
+    // 国名完全贴合国土的走向；缩放决定多小的国家才配露脸
     const minArea=labelMinArea(cam.z);
-    lctx.lineWidth=3; lctx.strokeStyle='rgba(0,0,0,0.75)'; lctx.fillStyle='#f0e6cf';
     for(let c=1;c<countries.length;c++){
       const cc=countries[c];
       if(!cc||!cc.alive||!cc.labels||!cc.labels.length) continue;
-      let drawn=0;
       for(const lb of cc.labels){
-        if(lb[2]<minArea) continue;
-        if(onePerCountry&&drawn>0) break;
-        const [sx,sy]=w2s(nearX(lb[0]),lb[1]);
-        if(sx<-80||sx>cw+80||sy<0||sy>ch) continue;
-        const w=cc.name.length*lb[3]*1.02, h=lb[3]*1.5;
-        if(!fits(sx,sy,w,h)) continue;
-        _labelHasContent=true; drawn++;
-        lctx.font='600 '+lb[3].toFixed(0)+'px "Microsoft YaHei",sans-serif';
-        lctx.strokeText(cc.name,sx,sy); lctx.fillText(cc.name,sx,sy);
+        if(lb.comp<minArea) continue;
+        if(drawWarpedLabel(cc,lb,false)) _labelHasContent=true;
       }
     }
   } else {
-    // 大比例尺下省名才是主角；国名只留「大国」的一行淡影，免得整屏都是字
+    // 大比例尺下省名才是主角；国名缩成一层淡淡的底影
     const minArea=Math.max(labelMinArea(cam.z),4000);
     for(let c=1;c<countries.length;c++){
       const cc=countries[c];
       if(!cc||!cc.alive||!cc.labels||!cc.labels.length) continue;
-      let drawn=0;
-      for(const lb of cc.labels){
-        if(lb[2]<minArea) continue;
-        if(drawn>0) break;                       // 大比例尺下国名也只要一个，省名才是主角
-        const [sx,sy]=w2s(nearX(lb[0]),lb[1]);
-        if(sx<-80||sx>cw+80||sy<0||sy>ch) continue;
-        const f=lb[3]*1.15, w=cc.name.length*f*1.02, h=f*1.5;
-        if(!fits(sx,sy,w,h)) continue;
-        _labelHasContent=true; drawn++;
-        lctx.font='600 '+f.toFixed(0)+'px "Microsoft YaHei",sans-serif';
-        lctx.fillStyle='rgba(240,230,207,0.42)';
-        lctx.fillText(cc.name,sx,sy);
-      }
+      const lb=cc.labels[0];
+      if(!lb||lb.comp<minArea) continue;
+      if(drawWarpedLabel(cc,lb,true)) _labelHasContent=true;
     }
     lctx.font='10px "Microsoft YaHei",sans-serif';
     lctx.lineWidth=2; lctx.strokeStyle='rgba(0,0,0,0.6)'; lctx.fillStyle='rgba(235,225,200,0.8)';
+    const boxes=[];
+    const fits=(x,y,w,h)=>{
+      const x0=x-w/2, x1=x+w/2, y0=y-h*0.8, y1=y+h*0.3;
+      for(let i=0;i<boxes.length;i++){
+        const b=boxes[i];
+        if(x0<b[2]&&x1>b[0]&&y0<b[3]&&y1>b[1]) return false;
+      }
+      boxes.push([x0,y0,x1,y1]);
+      return true;
+    };
     for(let i=1;i<provinces.length;i++){
       const p=provinces[i]; if(!p||!p.pix.length) continue;
       // 按屏幕坐标裁剪（世界坐标在接缝两侧不连续，不能直接比大小）
@@ -2884,14 +2941,24 @@ function infoTab(){
       </div>`;
       // 建造：兵营 / 城防（城防要在地图上重画模型，所以建完刷新面板）
       if(p.controller===player){
-        const canHere=true;
         const bcst=buildCost(p,'barracks'), fcst=buildCost(p,'fort');
-        h+=`<div class="hint" style="margin-top:6px;color:#c9a959">🏗 城市建设</div><div>`;
-        if(p.barracks) h+=`<button class="act" disabled>🏛 兵营已建成（驻军维护费减半）</button>`;
-        else h+=`<button class="act" style="background:#1e2e1c;border-color:#5a8a50;color:#b8e0a8" data-act="build-barracks" data-v="${p.id}" ${(canHere&&c.gold>=bcst)?'':'disabled'} title="驻扎在本省的军队维护费减半。本省被敌人占领时失效。">🏛 建造兵营（${bcst}金 · 驻扎军队维护费减半）</button>`;
-        if(p.fort>=FORT_MAX) h+=`<button class="act" disabled>🏯 城防已满级 Lv.${FORT_MAX}（驻军 ${garrisonOf(p)}）</button>`;
-        else h+=`<button class="act" style="background:#2e2a18;border-color:#8a7a40;color:#e8d8a0" data-act="build-fort" data-v="${p.id}" ${(canHere&&c.gold>=fcst)?'':'disabled'} title="每级 +1000 驻军；外圈一圈成为控制区，敌军不能在圈内横穿，必须先把城防打下来。攻方兵力越少、城防越高，围城越慢。">🏯 ${p.fort?`升级城防 Lv.${p.fort} → Lv.${p.fort+1}`:`建造城防 Lv.1`}（${fcst}金 · 驻军 ${(p.fort+1)*FORT_GARRISON}）</button>`;
-        h+=`</div>`;
+        const busy=p.buildKind||'';        // 工地占着的时候只能停工，不能再开一个
+        h+=`<div class="hint" style="margin-top:6px;color:#c9a959">🏗 城市建设</div>`;
+        if(busy){
+          const left=Math.max(0,p.buildDays|0), tot=Math.max(1,p.buildTotal||left);
+          const pct=Math.round((1-left/tot)*100);
+          h+=`<div class="row"><span>在建</span><b style="color:#ffd080">${BUILD_NAMES[busy]} ${pct}%</b>
+              <span class="hint">剩 ${Math.ceil(left/30)} 个月</span></div>
+            <div><button class="act" style="background:#3a2020;border-color:#8a4a4a;color:#ffb0b0" data-act="demolish" data-v="${p.id}" data-k="cancel">🧨 停工（退回一半造价）</button></div>`;
+        } else {
+          h+=`<div>`;
+          if(p.barracks) h+=`<button class="act" style="background:#1e2e1c;border-color:#5a8a50;color:#b8e0a8" data-act="demolish" data-v="${p.id}" data-k="barracks" title="拆掉兵营，退回一半造价">🏛 拆除兵营（+${Math.floor(BARRACKS_COST/2)}金）</button>`;
+          else h+=`<button class="act" style="background:#1e2e1c;border-color:#5a8a50;color:#b8e0a8" data-act="build-barracks" data-v="${p.id}" ${c.gold>=bcst?'':'disabled'} title="驻扎在本省的军队维护费减半。本省被敌人占领时失效。">🏛 建造兵营（${bcst}金 · ${Math.ceil(BARRACKS_DAYS/30)}个月 · 驻扎军队维护费减半）</button>`;
+          if(p.fort>=FORT_MAX) h+=`<button class="act" style="background:#2e2a18;border-color:#8a7a40;color:#e8d8a0" data-act="demolish" data-v="${p.id}" data-k="fort" title="拆掉一级城防，退回一半造价">🏯 拆除一级城防 Lv.${p.fort}（+${Math.floor((FORT_COST[p.fort]||0)/2)}金）</button>`;
+          else h+=`<button class="act" style="background:#2e2a18;border-color:#8a7a40;color:#e8d8a0" data-act="build-fort" data-v="${p.id}" ${c.gold>=fcst?'':'disabled'} title="每级 +1000 驻军；外圈一圈成为控制区，敌军不能横穿。最短围城 ${FORT_MIN_DAYS[p.fort+1]} 天，堆多少兵都绕不过去。">🏯 ${p.fort?`升级城防 Lv.${p.fort} → Lv.${p.fort+1}`:`建造城防 Lv.1`}（${fcst}金 · ${Math.ceil((FORT_DAYS[p.fort+1]||0)/30)}个月 · 驻军 ${(p.fort+1)*FORT_GARRISON}）</button>`;
+          if(p.fort>0) h+=`<button class="act" data-act="demolish" data-v="${p.id}" data-k="fort" title="拆掉一级城防，退回一半造价">🧨 拆除一级城防</button>`;
+          h+=`</div>`;
+        }
       }
       // 划地分封：进地图模式一次性圈出整片封地，再建立傀儡国
       if(!overlordOf(player)&&c.provList.length>1&&p.controller===player){
@@ -3098,6 +3165,7 @@ document.addEventListener('click',e=>{
     case 'develop': doDevelop(+v); break;
     case 'build-barracks': doBuild(+v,'barracks'); break;
     case 'build-fort': doBuild(+v,'fort'); break;
+    case 'demolish': doDemolish(+v,el.dataset.k); break;
     case 'recruit': doRecruit(+v); break;
     case 'recruit-navy': doRecruitNavy(+v); break;
     case 'disband': if(MP.online){ mpCmd({c:'disband',army:+v}); break; } armies=armies.filter(a=>a.id!==+v); if(selectedArmy===+v)selectedArmy=0; refreshPanel(); break;
@@ -3260,6 +3328,15 @@ function doDevelop(pid){
   recomputeCap(c);
   pushLog(`${p.name} 得到发展（发展度 ${devOf(p)}）`,'gold');
   if(mapMode==='dev') recolorProvince(pid);
+  refreshPanel();
+}
+/* 拆除（或给在建工程停工）：退还一半造价 */
+function doDemolish(pid,kind){
+  if(MP.online) return mpCmd({c:'demolish',prov:pid,kind});
+  const err=demolishBuilding(player,pid,kind);
+  if(err){ pushLog('拆除失败：'+err,'war'); return; }
+  _bldEpoch++;
+  recolorProvAndNbrs(pid);
   refreshPanel();
 }
 function doRecruit(pid){

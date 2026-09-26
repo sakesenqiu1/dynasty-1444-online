@@ -314,6 +314,11 @@ class Room {
         if (err) throw new Error(err);
         break;
       }
+      case 'demolish': {
+        const err = core.demolishBuilding(me, +m.prov, String(m.kind || ''));
+        if (err) throw new Error(err);
+        break;
+      }
       case 'navy': {
         const prov = st.provinces[+m.prov];
         const c = st.countries[me];
@@ -682,9 +687,11 @@ class Room {
       }
       const dk = p.tax + p.prod * 1000 + p.man * 1e6;
       if (dev.get(i) !== dk) { dev.set(i, dk); devOut.push([i, p.tax, p.prod, p.man]); }
-      // 建筑：兵营 0/1、城防 0..MAX。变一个字节就推一行，和开发度同一套指纹法
-      const bk = (p.barracks ? 1 : 0) + (p.fort || 0) * 16;
-      if (bld.get(i) !== bk) { bld.set(i, bk); bldOut.push([i, p.barracks ? 1 : 0, p.fort || 0]); }
+      // 建筑：兵营 0/1、城防 0..MAX、在建工程与剩余天数。变一点就推一行
+      const bkind = p.buildKind === 'barracks' ? 1 : (p.buildKind === 'fort' ? 2 : 0);
+      const bdays = Math.round(p.buildDays || 0);
+      const bk = (p.barracks ? 1 : 0) + (p.fort || 0) * 16 + bkind * 256 + bdays * 4096;
+      if (bld.get(i) !== bk) { bld.set(i, bk); bldOut.push([i, p.barracks ? 1 : 0, p.fort || 0, bkind, bdays]); }
     }
 
     for (let i = 1; i < st.countries.length; i++) {

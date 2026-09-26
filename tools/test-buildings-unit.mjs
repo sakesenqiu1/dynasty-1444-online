@@ -26,12 +26,15 @@ const ctx = vm.createContext(sb);
 vm.runInContext(read('web/world-data.js'), ctx, { filename: 'world-data.js' });
 vm.runInContext(read('web/game-core.js'), ctx, { filename: 'game-core.js' });
 const run = (c) => vm.runInContext(`(function(){ ${c} })()`, ctx, { filename: 't' });
+/* 内核里的常量，测试里直接引用，免得两边写死两套数字 */
+const K = run('return { BARRACKS_COST, BARRACKS_DAYS, FORT_COST, FORT_DAYS, FORT_MAX, FORT_MIN_DAYS, FORT_GARRISON };');
+const BARRACKS_COST_B = K.BARRACKS_COST, FORT_COST_B = K.FORT_COST, FORT_DAYS_B = K.FORT_DAYS;
 
 console.log('\n=== 城市建筑 / 城防控制区 ===\n');
 run('resetWorld(); setSeed(SCENARIO_SEED); buildWorld();');
 
-/* ================= 1. 建造校验 ================= */
-console.log('-- 1. 建造校验 --');
+/* ================= 1. 建造校验与工期 ================= */
+console.log('-- 1. 建造校验与工期 --');
 const b1 = run(`
   const A=countries.find(c=>c&&c.alive&&c.provList.length>6);
   const B=countries.find(c=>c&&c.alive&&c.id!==A.id&&c.provList.length>6);
@@ -44,35 +47,108 @@ const b1 = run(`
   out.goldBefore=A.gold;
   out.ok1=buildBuilding(A.id,pid,'barracks');
   out.goldAfter=A.gold;
-  out.barracks=p.barracks;
-  out.errDup=buildBuilding(A.id,pid,'barracks');          // 重复建
-  out.fortBefore=p.fort;
-  out.ok2=buildBuilding(A.id,pid,'fort');
-  out.fortAfter=p.fort;
-  A.gold=0;
-  out.errPoor=buildBuilding(A.id,pid,'fort');             // 没钱
-  // 升到满级
+  out.barracksRightAfter=p.barracks;                       // 刚下单还没建成
+  out.days=p.buildDays; out.total=p.buildTotal;
+  out.errBusy=buildBuilding(A.id,pid,'fort');              // 工地占着，不能再开一个
+  // 工期走完
+  let d=0; while(p.buildKind&&d<2000){ tickBuild(); d++; }
+  out.builtDays=d; out.barracks=p.barracks;
+  out.errDup=buildBuilding(A.id,pid,'barracks');           // 重复建
   A.gold=100000;
-  let ups=0;
-  while(p.fort<FORT_MAX&&!buildBuilding(A.id,pid,'fort')) ups++;
-  out.ups=ups; out.fortMax=p.fort;
+  // 城防：从 0 一路升到满级，每一级都要等工期
+  const spent=[];
+  for(let lv=1;lv<=FORT_MAX;lv++){
+    out['fortErr'+lv]=buildBuilding(A.id,pid,'fort');
+    let k=0; while(p.buildKind&&k<3000){ tickBuild(); k++; }
+    spent.push(k);
+  }
+  out.fortSteps=spent; out.fortMax=p.fort;
   out.errMax=buildBuilding(A.id,pid,'fort');
-  // 被别人占领时不能建
-  p.controller=B.id;
+  // 占领中不能建
+  const oldC=p.controller; p.controller=B.id;
   out.errOcc=buildBuilding(A.id,pid,'fort');
-  p.controller=A.id;
+  p.controller=oldC;
+  // 没钱
+  A.gold=0; p.fort=0;
+  out.errPoor=buildBuilding(A.id,pid,'fort');
+  A.gold=100000;
   return out;
 `);
 check('只能在自己的领土上建造', /只能在自己/.test(b1.errOwn || ''), b1.errOwn);
 check('未知建筑被拒绝', /未知的建筑/.test(b1.errKind || ''), b1.errKind);
-check('兵营建造成功并扣钱', b1.ok1 === null && b1.barracks === 1 && b1.goldBefore - b1.goldAfter === 150,
-  [b1.ok1, b1.barracks, b1.goldBefore - b1.goldAfter]);
+check('下单时立即扣钱', b1.ok1 === null && b1.goldBefore - b1.goldAfter === BARRACKS_COST_B,
+  [b1.ok1, b1.goldBefore - b1.goldAfter]);
+check('【核心】下单不会立刻建成，要等工期', b1.barracksRightAfter === 0 && b1.days > 0,
+  [b1.barracksRightAfter, b1.days]);
+check(`兵营工期 = ${b1.total} 天（约 ${Math.round(b1.total / 30)} 个月）`, b1.total === 90 && b1.builtDays === 90, b1);
+check('工期走完才真的建好', b1.barracks === 1, b1.barracks);
+check('工地占着时不能再开一个', /正在修建/.test(b1.errBusy || ''), b1.errBusy);
 check('兵营不能重复建', /已有兵营/.test(b1.errDup || ''), b1.errDup);
-check('城防从 0 升到 1 级', b1.ok2 === null && b1.fortBefore === 0 && b1.fortAfter === 1, [b1.fortBefore, b1.fortAfter]);
-check('金币不足会被拒绝', /金币不足/.test(b1.errPoor || ''), b1.errPoor);
-check(`城防能升到满级 Lv.${b1.fortMax}`, b1.fortMax === 5, [b1.ups, b1.fortMax]);
+check(`城防能逐级升到满级 Lv.${b1.fortMax}`, b1.fortMax === 5, [b1.fortSteps, b1.fortMax]);
+check('每一级城防都有自己的工期', b1.fortSteps.every((k, i) => k === FORT_DAYS_B[i + 1]), b1.fortSteps);
 check('满级后拒绝再升', /最高等级/.test(b1.errMax || ''), b1.errMax);
 check('本省不在自己控制下不能建造', /不在你控制/.test(b1.errOcc || ''), b1.errOcc);
+check('金币不足会被拒绝', /金币不足/.test(b1.errPoor || ''), b1.errPoor);
+
+/* ================= 1b. 拆除 ================= */
+console.log('\n-- 1b. 拆除与退款 --');
+const b1b = run(`
+  const A=countries.find(c=>c&&c.alive&&c.provList.length>6);
+  const pid=A.provList.find(x=>provinces[x].pix.length);
+  const p=provinces[pid];
+  p.fort=0; p.barracks=0; p.buildKind=''; p.buildDays=0; p.buildTotal=0;
+  A.gold=100000;
+  // 建一座兵营再拆
+  buildBuilding(A.id,pid,'barracks'); while(p.buildKind) tickBuild();
+  const g0=A.gold;
+  const e1=demolishBuilding(A.id,pid,'barracks');
+  const g1=A.gold;
+  // 建两级城防再拆一级
+  buildBuilding(A.id,pid,'fort'); while(p.buildKind) tickBuild();
+  buildBuilding(A.id,pid,'fort'); while(p.buildKind) tickBuild();
+  const fortBefore=p.fort, g2=A.gold;
+  const e2=demolishBuilding(A.id,pid,'fort');
+  const after=e2===null?provinces[pid].fort:null;   // 立刻记下来，后面还要复用这个省
+  const g3=A.gold;
+  // 拆工地
+  buildBuilding(A.id,pid,'fort');
+  const g4=A.gold;
+  const e3=demolishBuilding(A.id,pid,'cancel');
+  const g5=A.gold; const kindAfter=p.buildKind;
+  // 拆不存在的东西
+  p.fort=0; p.barracks=0;
+  const e4=demolishBuilding(A.id,pid,'barracks');
+  const e5=demolishBuilding(A.id,pid,'fort');
+  const e6=demolishBuilding(A.id,pid,'cancel');
+  return { e1, refundBarracks:g1-g0, e2, fortBefore, after,
+           refundFort:g3-g2, e3, refundCancel:g5-g4, kindAfter, e4, e5, e6 };
+`);
+check('拆除兵营成功并退回一半', b1b.e1 === null && b1b.refundBarracks === 75, b1b);
+check('拆除城防降一级（不是全拆）', b1b.e2 === null && b1b.after === b1b.fortBefore - 1, b1b);
+check('城防退款是当前等级造价的一半', b1b.refundFort === Math.floor(FORT_COST_B[b1b.fortBefore] / 2), b1b);
+check('可以给在建工程停工并退回一半', b1b.e3 === null && b1b.refundCancel > 0 && b1b.kindAfter === '', b1b);
+check('拆不存在的东西会被拒绝', /没有/.test(b1b.e4 || '') && /没有/.test(b1b.e5 || '') && /没有/.test(b1b.e6 || ''),
+  [b1b.e4, b1b.e5, b1b.e6]);
+
+/* ================= 1c. 工地被占领 ================= */
+console.log('\n-- 1c. 工地易主 --');
+const b1c = run(`
+  const A=countries.find(c=>c&&c.alive&&c.provList.length>6);
+  const B=countries.find(c=>c&&c.alive&&c.id!==A.id);
+  const pid=A.provList.find(x=>provinces[x].pix.length);
+  const p=provinces[pid];
+  p.fort=0; p.barracks=0; p.buildKind=''; p.buildDays=0;
+  A.gold=100000;
+  buildBuilding(A.id,pid,'fort');
+  const had=p.buildKind;
+  p.controller=B.id;                 // 敌人打进来了
+  tickBuild();
+  const after=p.buildKind, fort=p.fort;
+  p.controller=A.id;
+  return { had, after, fort };
+`);
+check('在建工地被敌人占领则废弃（不会给敌人修城防）',
+  b1c.had === 'fort' && b1c.after === '' && b1c.fort === 0, b1c);
 
 /* ================= 2. 城防驻军 ================= */
 console.log('\n-- 2. 城防守军 --');
@@ -87,28 +163,41 @@ const g = run(`
 `);
 check('每级城防 +1000 驻军', g.every(([L, gar]) => gar === L * 1000), g);
 
-/* ================= 3. 攻城结算：兵力 / 城防 / 运气 ================= */
+/* ================= 3. 攻城结算：兵力 / 城防 / 运气 / 最短工期 ================= */
 console.log('\n-- 3. 攻城结算 --');
 const sg = run(`
   const p={fort:0};
   const avg=(bstr,fort,n)=>{ p.fort=fort; let s=0; for(let i=0;i<n;i++) s+=siegeDailyProgress(bstr,p); return s/n; };
-  const weak=avg(3000,0,4000), mid=avg(3000,1,4000), strong=avg(3000,3,4000), max5=avg(3000,5,4000);
-  const big=avg(30000,3,4000), tiny=avg(300,3,4000);
-  // 运气：同样条件下多摇几次，应当有波动且落在 ±45% 内
+  const days=(bstr,fort)=>Math.round(100/avg(bstr,fort,3000));
+  const out={
+    noFort: days(3000,0),                       // 无城防基准
+    lv1: days(10000,1), lv3: days(10000,3), lv5: days(10000,5),
+    lv5huge: days(300000,5),                    // 30 万大军打 5 级
+    lv1huge: days(300000,1),
+    lv3tiny: days(300,3),                       // 300 人打 3 级
+    lv5big: days(100000,5),
+  };
   p.fort=0;
   let lo=1e9, hi=-1e9;
   for(let i=0;i<4000;i++){ const v=siegeDailyProgress(3000,p); if(v<lo)lo=v; if(v>hi)hi=v; }
   const base=3000/SIEGE_DIV;
-  return { weak,mid,strong,max5,big,tiny, lo:lo/base, hi:hi/base, base };
+  return { ...out, lo:lo/base, hi:hi/base, minDays:FORT_MIN_DAYS, base };
 `);
-console.log(`  每日进度（3000 兵）：无城防 ${sg.weak.toFixed(3)} → Lv1 ${sg.mid.toFixed(3)} → Lv3 ${sg.strong.toFixed(3)} → Lv5 ${sg.max5.toFixed(3)}`);
-console.log(`  运气幅度：${sg.lo.toFixed(3)} ~ ${sg.hi.toFixed(3)}（基准 ${sg.base.toFixed(3)}）`);
-check('没有城防时和以前一样（进度 = 兵力/3000）', Math.abs(sg.weak - sg.base) < sg.base * 0.08, [sg.weak, sg.base]);
-check('城防越高围得越慢', sg.mid < sg.weak && sg.strong < sg.mid && sg.max5 < sg.strong,
-  [sg.weak, sg.mid, sg.strong, sg.max5]);
-check('攻方兵力越多围得越快', sg.big > sg.strong, [sg.big, sg.strong]);
-check('兵力远小于驻军时几乎围不动（但有下限，不是永远为 0）', sg.tiny > 0 && sg.tiny < sg.strong * 0.35, [sg.tiny, sg.strong]);
-check('运气在 ±45% 以内波动', sg.lo > 0.54 && sg.hi < 1.46 && sg.hi - sg.lo > 0.5, [sg.lo, sg.hi]);
+console.log(`  围城天数：无城防 ${sg.noFort} 天`);
+console.log(`  1万兵：Lv1 ${sg.lv1} 天，Lv3 ${sg.lv3} 天，Lv5 ${sg.lv5} 天`);
+console.log(`  30万兵：Lv1 ${sg.lv1huge} 天，Lv5 ${sg.lv5huge} 天`);
+console.log(`  300 兵打 Lv3：${sg.lv3tiny} 天`);
+check('没有城防时和以前一样（进度 = 兵力/3000）', Math.abs(sg.base - 1) < 1e-9, sg.base);
+check('城防越高围得越久', sg.lv1 < sg.lv3 && sg.lv3 < sg.lv5, [sg.lv1, sg.lv3, sg.lv5]);
+check(`【核心】城堡至少拖住敌人一两个月（Lv1 ${sg.lv1huge} 天 ≥ ${sg.minDays[1]}）`,
+  sg.lv1huge >= sg.minDays[1], sg.lv1huge);
+check(`【核心】Lv3 至少 ${sg.minDays[3]} 天`, sg.lv3 >= sg.minDays[3], sg.lv3);
+check(`【核心】Lv5 至少 ${sg.minDays[5]} 天`, sg.lv5 >= sg.minDays[5], sg.lv5);
+check('【核心】堆兵到 30 万也不能更快突破（和 10 万一样慢）',
+  sg.lv5huge >= sg.minDays[5] && sg.lv5huge === sg.lv5big, [sg.lv5huge, sg.lv5big]);
+check('弱旅照样磨得下来，只是慢很多（不会永远卡住）',
+  sg.lv3tiny > sg.lv3 * 2 && sg.lv3tiny < 4000, [sg.lv3tiny, sg.lv3]);
+check('运气在 ±35% 以内波动', sg.lo > 0.64 && sg.hi < 1.36 && sg.hi - sg.lo > 0.5, [sg.lo, sg.hi]);
 
 /* ================= 4. 控制区（ZOC） ================= */
 console.log('\n-- 4. 城防控制区 --');
