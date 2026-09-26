@@ -261,7 +261,7 @@ class Room {
           const pathArr = core.findPath(a.prov, pid, a.owner);
           // 拿不到路时再算一遍「不管城防」的版本，好区分是城防挡的还是真没路
           if (!pathArr) throw new Error(core.findPath(a.prov, pid, 0)
-            ? '打不通：路上有敌方城防，必须先把它攻下来（城防外圈禁止敌军横穿）'
+            ? '打不通：路上有敌方城防（城防外圈禁止敌军横穿），必须先把它攻下来'
             : '无法找到通往该省的陆路');
           a.path = pathArr; a.prog = 0;
         }

@@ -227,12 +227,12 @@ const zoc = run(`
     if(!provinces[r].nbrs.includes(q)) continue;
     if(zocAllows(zocB2,r,q)) allowed++; else blocked++;
   }
-  // 要塞本身：敌军必须进不去（这就是「不能从城墙所在地块穿越」）
-  let toFort=0, toFortOk=0;
-  for(const r of ring){ toFort++; if(zocAllows(zocB2,r,F)) toFortOk++; }
-  // 站在外圈任意一格，围攻目标都应当是那座要塞
-  let siegeHit=0;
-  for(const r of ring) if(siegeTargetFor(r,B.id)===F) siegeHit++;
+  // 要塞/城市那一格：不能穿过去，但可以作为行军终点走进去（到了就攻城）
+  let toFort=0, toFortOk=0, cityAsDest=0;
+  for(const r of ring){ toFort++; if(zocAllows(zocB2,r,F)) toFortOk++; if(zocAllows(zocB2,r,F,F)) cityAsDest++; }
+  // 站在外圈不会开打要塞城市：外圈那一格不是要塞城市格，围的是它自己脚下的省
+  let ringSiege=0;
+  for(const r of ring) if(hostileFortAt(r,B.id)===F) ringSiege++;
   // 自家军队不受自己要塞的影响
   let ownBlocked=0;
   for(const r of ring) for(const q of ring){
@@ -241,7 +241,7 @@ const zoc = run(`
   }
   provinces[F].fort=0;
   return { A:A.id, B:B.id, F, fname:provinces[F].name, ring:ring.length,
-           beforeRing, afterRing, blocked, allowed, toFort, toFortOk, siegeHit, ownBlocked };
+           beforeRing, afterRing, blocked, allowed, toFort, toFortOk, cityAsDest, ringSiege, ownBlocked };
 `);
 if (!zoc) {
   console.log('  SKIP  没找到合适的要塞位置');
@@ -250,14 +250,16 @@ if (!zoc) {
   check('没有城防时没有控制区', zoc.beforeRing === 0, zoc.beforeRing);
   check('建了城防之后外圈全部变成控制区', zoc.afterRing === zoc.ring, [zoc.afterRing, zoc.ring]);
   check('敌军在外圈内部横向穿行会被挡', zoc.blocked > 0 && zoc.allowed === 0, [zoc.blocked, zoc.allowed]);
-  check('【核心】要塞所在的那一格敌军进不去（不能从城墙所在地块穿越）',
-    zoc.toFortOk === 0, [zoc.toFortOk, zoc.toFort]);
-  check('【核心】站在外圈任意一格都能围攻这座要塞', zoc.siegeHit === zoc.ring, [zoc.siegeHit, zoc.ring]);
+  check('【核心】城市那一格不能穿过去（路过一律挡住）', zoc.toFortOk === 0, [zoc.toFortOk, zoc.toFort]);
+  check('【核心】但可以把城市那一格当作行军终点走进去（到达城市地块才攻城）',
+    zoc.cityAsDest === zoc.ring, [zoc.cityAsDest, zoc.ring]);
+  check('【核心】站在外圈不会自动打邻居的城（不再"在旁边的地块就攻城"）',
+    zoc.ringSiege === 0, [zoc.ringSiege, zoc.ring]);
   check('自家军队不受自己要塞控制区影响', zoc.ownBlocked === 0, zoc.ownBlocked);
 }
 
 /* ================= 5. 【核心】控制区不会让要塞变成打不到的铁乌龟 ================= */
-console.log('\n-- 5. 【核心】穷举：任何能走到要塞的省，有城防时也一定能走到「能围攻它的外圈」 --');
+console.log('\n-- 5. 【核心】穷举：有城防之后，军队仍然能走到城市地块（不会变成打不到的铁乌龟） --');
 const reach = run(`
   const A=countries.find(c=>c&&c.alive&&c.provList.length>10);
   const B=countries.find(c=>c&&c.alive&&c.id!==A.id&&c.provList.length>10&&!atWar(A.id,c.id));
@@ -271,35 +273,45 @@ const reach = run(`
     for(let i=1;i<provinces.length;i++){
       const p=provinces[i];
       if(!p||!p.pix.length||i===F) continue;
-      free.push(findPath(i,F,B.id)!==null);          // 无城防时能不能到要塞
+      free.push(findPath(i,F,B.id)!==null);          // 无城防时能不能到这座城
     }
     provinces[F].fort=4;
-    let lost=0, lostIds=[], tested=0, canEnterFort=0;
+    let lost=0, lostIds=[], tested=0, through=0;
     let k=0;
     for(let i=1;i<provinces.length;i++){
       const p=provinces[i];
       if(!p||!p.pix.length||i===F) continue;
-      if(findPath(i,F,B.id)!==null) canEnterFort++;   // 有城防后还能进要塞 = bug
+      const path=findPath(i,F,B.id);
+      if(path){
+        // 城市格只能出现在路径最后一格：中途出现 = 穿城而过 = bug
+        for(let j=0;j<path.length-1;j++) if(path[j]===F) through++;
+      }
       if(free[k++]){
         tested++;
-        // 至少要能走到外圈某一格，才谈得上围攻
-        const canSiege=ring.some(r=>findPath(i,r,B.id)!==null);
-        if(!canSiege){ lost++; if(lostIds.length<5) lostIds.push(i); }
+        // 有城防之后照样要能走到城市所在地块（否则就是永远打不下来的铁乌龟）
+        if(!path){ lost++; if(lostIds.length<5) lostIds.push(i); }
       }
     }
+    // 外圈也应当能走到（列阵位置）
+    let ringLost=0;
+    for(let i=1;i<provinces.length;i++){
+      const p=provinces[i];
+      if(!p||!p.pix.length||i===F) continue;
+      if(ring.length&&!ring.some(r=>findPath(i,r,B.id)!==null)) ringLost++;
+    }
     provinces[F].fort=0;
-    out.push({ F, name:provinces[F].name, tested, lost, lostIds, canEnterFort });
+    out.push({ F, name:provinces[F].name, tested, lost, lostIds, through, ringLost });
   }
   return out;
 `);
-let totalTested = 0, totalLost = 0, totalEnter = 0;
+let totalTested = 0, totalLost = 0, totalThrough = 0, totalRingLost = 0;
 for (const r of reach) {
-  totalTested += r.tested; totalLost += r.lost; totalEnter += r.canEnterFort;
-  console.log(`  要塞 ${r.name}：${r.tested} 个省原本能打到，建城防后 ${r.lost} 个够不着、${r.canEnterFort} 个还能钻进要塞`);
+  totalTested += r.tested; totalLost += r.lost; totalThrough += r.through; totalRingLost += r.ringLost;
+  console.log(`  要塞 ${r.name}：${r.tested} 个省原本能打到，建城防后 ${r.lost} 个够不着、${r.through} 条路径穿城而过`);
 }
-check(`控制区没有制造任何「打不到的要塞」（穷举 ${totalTested} 个省·要塞组合）`, totalLost === 0,
+check(`控制区没有制造任何「打不到的城市」（穷举 ${totalTested} 个省·要塞组合）`, totalLost === 0,
   reach.filter(r => r.lost).map(r => r.name + ':' + r.lostIds).slice(0, 3));
-check('【核心】有城防后没有任何一个省能钻进要塞那一格', totalEnter === 0, totalEnter);
+check('【核心】没有任何一条路径从城市那一格穿过去', totalThrough === 0, totalThrough);
 
 /* ---- 控制区确实改变了路线（不是形同虚设） ---- */
 const blockedPath = run(`
@@ -327,8 +339,8 @@ const blockedPath = run(`
 check('确实存在被控制区挡住的具体走法（不是形同虚设）', !!blockedPath, blockedPath);
 if (blockedPath) console.log(`  例：${blockedPath.a} → ${blockedPath.b}（${blockedPath.name} 的外圈）被挡住`);
 
-/* ================= 6. 【核心】端到端：站在外圈真的能把要塞打下来 ================= */
-console.log('\n-- 6. 【核心】站在外圈围攻要塞，直到攻克 --');
+/* ================= 6. 【核心】端到端：开进城市地块才能攻城 ================= */
+console.log('\n-- 6. 【核心】站在外圈不攻城；开进城市所在地块才开打，直到攻克 --');
 const e2e = run(`
   const A=countries.find(c=>c&&c.alive&&c.provList.length>10);
   const B=countries.find(c=>c&&c.alive&&c.id!==A.id&&c.provList.length>10&&!atWar(A.id,c.id));
@@ -341,27 +353,45 @@ const e2e = run(`
   if(!F) return null;
   const p=provinces[F];
   p.fort=3;
-  const ring=p.nbrs.find(r=>provinces[r].pix.length);
+  // 外圈要挑一块真正属于 A、由 A 控制的邻省（荒地/第三方不算，围它不会掉）
+  const ring=p.nbrs.filter(r=>provinces[r].pix.length&&provinces[r].controller===A.id);
   armies=armies.filter(a=>a.owner!==B.id);
-  armies.push({id:91001,owner:B.id,prov:ring,str:20000,path:[],prog:0});
-  const target=siegeTargetFor(ring,B.id);
+  // ① 先站在外圈：绝不能碰到城市本身
+  const ringProv=ring[0];
+  armies.push({id:91001,owner:B.id,prov:ringProv,str:20000,path:[],prog:0});
   const ctrlBefore=p.controller;
+  const ringP=provinces[ringProv];
+  let d1=0;
+  while(d1<300&&ringP.controller!==B.id){ resolveSieges(); d1++; }
+  const fortHeldFromRing=p.controller;          // 站在外圈期间，要塞城市必须还在 A 手里
+  const ringTaken=ringP.controller===B.id;      // 外圈那一格会被正常占领（这是普通围城）
+  // ② 再开进城市地块：这一次才能真正开始攻城
+  armies=armies.filter(a=>a.id!==91001);
+  armies.push({id:91002,owner:B.id,prov:F,str:20000,path:[],prog:0});
+  const pathToCity=findPath(ringProv,F,B.id);   // 从外圈能走进城市格
   let days=0, captured=false;
   while(days<2000&&!captured){
     resolveSieges(); days++;
     if(p.controller===B.id) captured=true;
   }
-  const res={ F, ring, targetIsFort:target===F, ctrlBefore, after:p.controller, days, captured };
-  armies=armies.filter(a=>a.id!==91001);
-  p.fort=0; p.controller=p.owner;
+  const res={ F, ring:ring.length, ringProv, ctrlBefore, fortHeldFromRing, ringTaken, ringDays:d1,
+              sameOwner:fortHeldFromRing===ctrlBefore, canEnter:!!pathToCity,
+              pathEndsAtCity:!!pathToCity&&pathToCity[pathToCity.length-1]===F,
+              after:p.controller, days, captured };
+  armies=armies.filter(a=>a.id!==91001&&a.id!==91002);
+  ringP.controller=ringP.owner; ringP.siege=0;
+  p.fort=0; p.controller=p.owner; p.siege=0;
   return res;
 `);
 if (!e2e) {
   console.log('  SKIP  没找到合适的位置');
 } else {
-  console.log(`  要塞 #${e2e.F}：外圈省 #${e2e.ring} 上站了 2 万兵，${e2e.days} 天后攻破（城防 Lv3）`);
-  check('站在外圈时，围攻目标确实是那座要塞（不是脚下的省）', e2e.targetIsFort === true, e2e);
-  check('【核心】站在外圈真的能把要塞打下来', e2e.captured === true && e2e.after !== e2e.ctrlBefore, e2e);
+  console.log(`  要塞 #${e2e.F}（Lv3）：外圈 #${e2e.ringProv} 站 300 天不碰城市；开进城市后 ${e2e.days} 天攻破`);
+  check('【核心】站在外圈不会把城市打下来（外圈只围它自己脚下那一省）',
+    e2e.ringTaken === true && e2e.sameOwner === true, e2e);
+  check('【核心】从外圈可以走进城市所在地块（有路，且终点就是城市）',
+    e2e.canEnter === true && e2e.pathEndsAtCity === true, e2e);
+  check('【核心】开进城市地块之后才真的把城市打下来', e2e.captured === true && e2e.after !== e2e.ctrlBefore, e2e);
   check(`围城耗时 ${e2e.days} 天，落在「最短 60 天」的合理范围内`,
     e2e.days >= 60 && e2e.days < 400, e2e.days);
 }
@@ -392,10 +422,12 @@ const multi = run(`
   for(const r of provinces[F2].nbrs) inZ2.add(r);
   const overlap=[...inZ1].filter(x=>inZ2.has(x));
 
+  // 城市格（要塞本格）不参与"外圈互穿"的统计：站在城里随时可以撤出来
+  const isCityTile=(m,pid)=>!!(m.get(pid)&&m.get(pid).indexOf(pid)>=0);
   const blockedBefore=(()=>{
     let bad=0, tot=0;
     for(const x of inZ2) for(const y of provinces[x].nbrs){
-      if(!inZ2.has(y)||x===y||y===F2) continue;
+      if(!inZ2.has(y)||x===y||y===F2||isCityTile(zocB1,x)) continue;
       tot++; if(zocAllows(zocB1,x,y)) bad++;
     }
     return { bad, tot };
@@ -409,11 +441,18 @@ const multi = run(`
   const blockedAfter=(()=>{
     let bad=0, tot=0, sample=null;
     for(const x of inZ2) for(const y of provinces[x].nbrs){
-      if(!inZ2.has(y)||x===y||y===F2) continue;
+      if(!inZ2.has(y)||x===y||y===F2||isCityTile(zocB2,x)) continue;
       tot++; if(zocAllows(zocB2,x,y)){ bad++; if(!sample) sample=[x,y]; }
     }
     return { bad, tot, sample };
   })();
+  // 城市格：不能作为路过点，但可以走进去打、也可以从里面退出来
+  let cityTransit=0, cityIn=0, cityOut=0;
+  for(const x of provinces[F2].nbrs){
+    if(zocAllows(zocB2,x,F2)) cityTransit++;        // 从外圈"路过"城市格 = 不该发生
+    if(zocAllows(zocB2,x,F2,F2)) cityIn++;          // 终点就是城市格 = 攻城接近，允许
+    if(zocAllows(zocB2,F2,x)) cityOut++;            // 从城市格撤出来，允许
+  }
   const overlapStill=(()=>{
     let blocked=0, pairs=0;
     for(const x of overlap) for(const y of provinces[x].nbrs){
@@ -422,13 +461,14 @@ const multi = run(`
     }
     return { blocked, pairs, has:overlap.length };
   })();
-  let enterF2=0;
-  for(const x of provinces[F2].nbrs) if(zocAllows(zocB2,x,F2)) enterF2++;
+  let enterF2=0, destF2=0;
+  for(const x of provinces[F2].nbrs){ if(zocAllows(zocB2,x,F2)) enterF2++; if(zocAllows(zocB2,x,F2,F2)) destF2++; }
 
   provinces[F1].controller=savedC;
   provinces[F1].fort=0; provinces[F2].fort=0;
   return { F1, F2, overlaps:overlap.length,
-           before:blockedBefore, after:blockedAfter, overlapStill, enterF2 };
+           before:blockedBefore, after:blockedAfter, overlapStill, enterF2, destF2,
+           cityTransit, cityIn, cityOut };
 `);
 if (!multi) {
   console.log('  SKIP  没找到相邻的两座要塞位置');
@@ -439,7 +479,10 @@ if (!multi) {
     multi.after.bad === 0, multi.after);
   check('两座要塞重叠的省，打掉一座之后仍归另一座管',
     multi.overlapStill.pairs === 0 || multi.overlapStill.blocked > 0, multi.overlapStill);
-  check('打下 F1 之后依然钻不进 F2', multi.enterF2 === 0, multi.enterF2);
+  check('打下 F1 之后依然不能穿过 F2（路过一律挡住）', multi.enterF2 === 0, multi.enterF2);
+  check('但 F2 仍然可以打：从外圈能走进它的城市格', multi.destF2 > 0, multi.destF2);
+  check('城市格不能被当成路过点，但可以走进去打、也可以退出来',
+    multi.cityTransit === 0 && multi.cityIn > 0 && multi.cityOut > 0, multi);
 }
 
 /* ================= 7. 兵营：维护费减半 ================= */
@@ -493,7 +536,7 @@ check('存档保留城防与兵营', rt.after.fort === 3 && rt.after.barracks ==
 check('剧本保留城防与兵营', rt.fromScen.fort === 3 && rt.fromScen.barracks === 1, rt.fromScen);
 
 /* ================= 9. 【核心】控制区是墙，不是减速带 ================= */
-console.log('\n-- 9. 【核心】任意一条寻路结果都不许「路过」控制区 --');
+console.log('\n-- 9. 【核心】寻路结果不许「路过」控制区；只有去攻城时才能走进那一圈 --');
 const wall = run(`
   const A=countries.find(c=>c&&c.alive&&c.provList.length>12);
   const B=countries.find(c=>c&&c.alive&&c.id!==A.id&&c.provList.length>12&&!atWar(A.id,c.id));
@@ -509,7 +552,7 @@ const wall = run(`
   const zoc=zocMapFor(B.id);
   const covered=pid=>!!zoc.get(pid);
   const isFort=pid=>{ const p=provinces[pid]; return !!(p&&p.fort&&p.controller&&p.controller!==B.id&&atWar(B.id,p.controller)); };
-  let checked=0, transit=0, intoFort=0, sample=null;
+  let checked=0, transit=0, throughCity=0, sample=null;
   // 随机取 (起点,终点) 对，检查返回的路径
   let seed=12345;
   const rnd=()=>{ seed=(seed*1103515245+12345)&0x7fffffff; return seed/0x7fffffff; };
@@ -520,19 +563,24 @@ const wall = run(`
     const path=findPath(from,to,B.id);
     if(!path) continue;
     checked++;
+    const toIsCity=isFort(to);
     for(let k=0;k<path.length;k++){
-      if(intoFort===0&&isFort(path[k])){ intoFort++; sample=[from,to,path.slice()]; }
-      // 控制区只能作为**最后一步**踏入：中途出现在路径里 = 穿墙
-      if(covered(path[k])&&k!==path.length-1){ transit++; if(!sample) sample=[from,to,path.slice()]; }
+      const last=(k===path.length-1);
+      // 城市格只能出现在路径最后一格：中途出现 = 穿城而过
+      if(isFort(path[k])&&!last){ throughCity++; if(!sample) sample=[from,to,path.slice()]; }
+      if(!covered(path[k])||last) continue;
+      /* 中途可以出现在控制区里的唯一情形：终点就是这座要塞的城市格（为了打它而接近那一圈）。
+         其余任何中途踩进控制区 = 穿墙。 */
+      if(!(toIsCity&&zoc.get(path[k]).indexOf(to)>=0)){ transit++; if(!sample) sample=[from,to,path.slice()]; }
     }
   }
-  const res={ forts, checked, transit, intoFort, sample };
+  const res={ forts, checked, transit, throughCity, sample };
   for(const pid of A.provList) if(provinces[pid]) provinces[pid].fort=0;
   return res;
 `);
-console.log(`  8 座要塞的控制区，抽查 ${wall.checked} 条可达路径`);
+console.log(`  ${wall.forts} 座要塞的控制区，抽查 ${wall.checked} 条可达路径`);
 check('【核心】没有任何一条路径中途穿过控制区（打下要塞≠旁边就通）', wall.transit === 0, wall.sample);
-check('【核心】没有任何一条路径走进要塞那一格', wall.intoFort === 0, wall.sample);
+check('【核心】没有任何一条路径从城市那一格穿过去', wall.throughCity === 0, wall.sample);
 
 /* ================= 10. 【核心】行军每一步都复核控制区 ================= */
 console.log('\n-- 10. 【核心】路径是城防修好之前算好的，也必须停在墙外 --');
@@ -540,7 +588,7 @@ const march = run(`
   const A=countries.find(c=>c&&c.alive&&c.provList.length>12);
   const B=countries.find(c=>c&&c.alive&&c.id!==A.id&&c.provList.length>8&&!atWar(A.id,c.id));
   declareWar(B.id,A.id);
-  // 找一座要塞 F：从 B 的地盘能走到 F 另一侧的省（中间必须经过 F 的外圈）
+  // 找一座要塞 F：从 B 的地盘能走到 F 另一侧的省（中间必须经过 F 或它的外圈）
   let F=0, start=0, dst=0;
   for(const pid of A.provList){
     const p=provinces[pid];
@@ -548,7 +596,6 @@ const march = run(`
     const ring=p.nbrs.filter(r=>provinces[r].pix.length);
     if(ring.length<2) continue;
     p.fort=0;
-    // 找一对省：起点在 F 的一侧、终点在另一侧，且路必须穿过 F 或它的外圈
     for(const r of ring){
       const behind=provinces[r].nbrs.find(q=>q!==pid&&provinces[q].pix.length&&!ring.includes(q));
       if(!behind) continue;
@@ -567,33 +614,30 @@ const march = run(`
   const p=provinces[F];
   // ① 没城防时先算好一条「穿过要塞那一格」的旧路径
   const stale=findPath(start,dst,B.id);
-  if(!stale) return null;
+  if(!stale||!stale.includes(F)) return null;
   // ② 城防落成（路径已经握在手里了 —— 模拟 AI 的路径 / 你在敌人修城防之前下的令）
   p.fort=4;
   armies=armies.filter(a=>a.owner!==B.id);
   const a={id:92001,owner:B.id,prov:start,str:20000,path:stale.slice(),prog:0};
   armies.push(a);
-  const seen=[], illegal=[];
-  let halted=0, haltedAt=0, sieged=false, captured=false, capDay=0;
-  for(let d=0;d<160;d++){
+  let halted=0, haltedAt=0, sieged=false, captured=false, capDay=0, reachedDay=0, everEnteredCityBeforeFall=0;
+  for(let d=0;d<220;d++){
     const before=a.prov;
     tickDay();
     if(a.prov!==before){
-      const q=provinces[a.prov];
-      // 军队实际迈出的每一步，都必须过得了当时的控制区
-      const ok=zocAllows(zocMapFor(a.owner),before,a.prov,true);
-      if(!ok) illegal.push([before,a.prov]);
-      seen.push(a.prov);
+      // 军队实际迈出的每一步，都必须过得了当时的控制区（终点按当时的路径末点算）
+      const ok=zocAllows(zocMapFor(a.owner),before,a.prov,a.path.length?a.path[a.path.length-1]:a.prov);
+      if(!ok) everEnteredCityBeforeFall++;
     }
     if(p.siege>0) sieged=true;
-    if(p.controller===B.id){ if(!captured){captured=true;capDay=d+1;} }
+    if(p.controller===B.id&&!captured){ captured=true; capDay=d+1; }
     if(halted===0&&a.path.length===0){ halted=d+1; haltedAt=a.prov; }
-    if(a.prov===dst) break;
+    if(a.prov===dst&&!reachedDay) reachedDay=d+1;
   }
   const res={ F, name:p.name, start, dst, halted, haltedAt,
-              reached:a.prov===dst, illegal:illegal.length, illegalSample:illegal[0]||null,
-              adjacentToFort:provinces[haltedAt||a.prov].nbrs.includes(F),
-              final:a.prov, sieged, captured, capDay, siege:provinces[F].siege };
+              reached:!!reachedDay, reachedDay, illegal:everEnteredCityBeforeFall,
+              final:a.prov, sieged, captured, capDay, siege:provinces[F].siege,
+              fortController:p.controller===B.id };
   armies=armies.filter(x=>x.id!==92001);
   p.fort=0; p.controller=p.owner; p.siege=0;
   return res;
@@ -603,10 +647,10 @@ if (!march) {
 } else {
   console.log(`  要塞 ${march.name}：军队带着旧路径出发，第 ${march.halted} 天停在 #${march.haltedAt}` +
     (march.captured ? `，第 ${march.capDay} 天攻破` : ''));
-  check('【核心】旧路径不能穿墙：军队没有抵达墙对面的目标省', march.reached === false, march);
-  check('【核心】行军途中没有任何一步违反控制区规则', march.illegal === 0, march.illegalSample);
-  check('撞墙后停到要塞外圈上（就地开始围攻，不是卡在半路）', march.adjacentToFort === true, march);
-  check('【核心】围攻照常开始并最终攻破（打不下要塞才是死局）', march.sieged === true, march);
+  check('【核心】旧路径不能穿墙：攻下要塞之前军队没到过墙对面', !march.reachedDay || march.reachedDay > march.capDay, march);
+  check('【核心】行军途中没有任何一步违反控制区规则', march.illegal === 0, march);
+  check('【核心】撞墙后改去打挡路的那座要塞，并最终攻破（打不下才是死局）',
+    march.sieged === true && march.captured === true, march);
 }
 
 /* ================= 11. 城池图标锚点必须落在自己的省内 ================= */
@@ -637,8 +681,8 @@ console.log(`  抽查 ${anchor.total} 个省：锚点落在本省 ${anchor.ok} �
 check('【核心】每个省的城池图标锚点都落在本省领土内（不会画到隔壁省）', anchor.bad === 0, anchor.badSample);
 check('每个有领土的省都有城池锚点', anchor.noAnchor === 0, anchor.noAnchor);
 
-/* ================= 12. 两座要塞相邻时，围的是最近的那一座 ================= */
-console.log('\n-- 12. 军队夹在两座要塞中间时，围攻目标 = 最近的那一座 --');
+/* ================= 12. 只打脚下那一座城：站在外圈绝不开打 ================= */
+console.log('\n-- 12. 【核心】站在外圈不开打；走到城市地块才开打，且只打这一座 --');
 const pick = run(`
   const A=countries.find(c=>c&&c.alive&&c.provList.length>12);
   const B=countries.find(c=>c&&c.alive&&c.id!==A.id&&c.provList.length>8&&!atWar(A.id,c.id));
@@ -652,23 +696,36 @@ const pick = run(`
   }
   if(!X) return null;
   provinces[F1].fort=5; provinces[F2].fort=1;
-  const cx=provinces[X].cx, cy=provinces[X].cy;
-  const d2=f=>{ const q=provinces[f]; let dx=q.cx-cx, dy=q.cy-cy;
-    if(dx>COLS/2) dx-=COLS; else if(dx<-COLS/2) dx+=COLS; return dx*dx+dy*dy; };
-  const near=d2(F1)<=d2(F2)?F1:F2, far=near===F1?F2:F1;
-  const byDist=siegeTargetFor(X,B.id,cx,cy);
-  const byLevel=siegeTargetFor(X,B.id);
-  const res={ X, F1, F2, near, far, byDist, byLevel,
-              distNear:+Math.sqrt(d2(near)).toFixed(1), distFar:+Math.sqrt(d2(far)).toFixed(1) };
+  armies=armies.filter(a=>a.owner!==B.id);
+  const f1c=provinces[F1].controller, f2c=provinces[F2].controller;
+  // ① 站在夹缝那一格（它同时挨着两座要塞）：两座城都不该掉
+  armies.push({id:93001,owner:B.id,prov:X,str:60000,path:[],prog:0});
+  for(let d=0;d<400;d++) resolveSieges();
+  const Xc=provinces[X].controller;
+  const heldF1=provinces[F1].controller===f1c, heldF2=provinces[F2].controller===f2c;
+  // ② 走进 F1 的城市格：只有 F1 会掉
+  armies=armies.filter(a=>a.id!==93001);
+  provinces[X].controller=provinces[X].owner; provinces[X].siege=0;
+  armies.push({id:93002,owner:B.id,prov:F1,str:60000,path:[],prog:0});
+  let d1=0; while(d1<2000&&provinces[F1].controller===f1c){ resolveSieges(); d1++; }
+  const tookF1=provinces[F1].controller===B.id, heldF2b=provinces[F2].controller===f2c;
+  const canEnterF1=!!findPath(X,F1,B.id);
+  const res={ X, F1, F2, Xtaken:Xc===B.id, heldF1, heldF2, tookF1, heldF2b, d1, canEnterF1 };
+  armies=armies.filter(a=>a.id!==93001&&a.id!==93002);
   provinces[F1].fort=0; provinces[F2].fort=0;
+  provinces[F1].controller=f1c; provinces[F2].controller=f2c; provinces[F1].siege=0;
   return res;
 `);
 if (!pick) {
   console.log('  SKIP  没找到夹在两座要塞中间的省');
 } else {
-  console.log(`  省 #${pick.X} 夹在 #${pick.F1}(Lv5, ${pick.distNear}px) 与 #${pick.F2}(Lv1, ${pick.distFar}px) 之间`);
-  check('【核心】围攻的是离军队最近的那座要塞（不是等级最高的那座）', pick.byDist === pick.near, pick);
-  check('不给坐标时退回「等级最高」的确定性选择（AI/旧调用不受影响）', pick.byLevel === pick.F1, pick);
+  console.log(`  省 #${pick.X} 同时挨着 #${pick.F1}(Lv5) 与 #${pick.F2}(Lv1)`);
+  check('【核心】站在外圈（同时挨着两座城）不会自动开打任何一座城',
+    pick.heldF1 === true && pick.heldF2 === true, pick);
+  check('脚下那一格照旧会被正常占领（那不是攻城，是普通围城）', pick.Xtaken === true, pick);
+  check('【核心】走进 F1 的城市格之后只有 F1 被打下来，隔壁 F2 毫发无损',
+    pick.tookF1 === true && pick.heldF2b === true, pick);
+  check('从外圈能走进城市格（有路可走）', pick.canEnterF1 === true, pick);
 }
 
 console.log(`\n=== result: ${failures === 0 ? 'ALL PASS' : failures + ' FAILED'} ===\n`);

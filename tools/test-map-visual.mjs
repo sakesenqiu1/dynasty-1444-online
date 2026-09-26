@@ -329,6 +329,45 @@ if (!forts) {
   check('中比例尺不画普通城镇', fortCount.townsDrawn === 0, fortCount.townsDrawn);
 }
 
+/* ---- 行军路线：红箭头特效（有路径要画红箭头，而且会动） ---- */
+const arrows = await p.eval(`
+  ${VIEW}
+  const a=armies.find(x=>!x.isNavy&&x.owner&&provinces[x.prov]&&provinces[x.prov].pix.length
+    &&provinces[x.prov].nbrs.some(q=>provinces[q].pix.length));
+  if(!a) return null;
+  const prevPlayer=player, prevSel=selectedArmy, prevStarted=started;
+  player=a.owner; selectedArmy=a.id; started=true;
+  const nb=provinces[a.prov].nbrs.find(q=>provinces[q].pix.length);
+  const path=findPath(a.prov,nb,a.owner);
+  a.path=(path&&path.length)?path:[nb]; a.prog=0;
+  __view(6.0, provinces[nb].cx, provinces[nb].cy); _frameKey='';
+  // 逐像素比较「有路径 / 无路径」两帧，挑出只有画了箭头才会出现的偏红像素
+  const snap=()=>{ _frameKey=''; render(performance.now()); return ctx.getImageData(0,0,mapCv.width,mapCv.height).data; };
+  const sig=(d)=>{ let h=0; for(let i=0;i<d.length;i+=4) if(d[i]>190&&d[i+1]<115&&d[i+2]<95) h=(h*33+i)|0; return h; };
+  const withP=snap();
+  a.path=[]; a.prog=0;
+  const withoutP=snap();
+  let arrowPx=0;
+  for(let i=0;i<withP.length;i+=4){
+    if(withP[i]>180&&withP[i+1]<130&&withP[i+2]<120&&
+       (Math.abs(withP[i]-withoutP[i])+Math.abs(withP[i+1]-withoutP[i+1])+Math.abs(withP[i+2]-withoutP[i+2]))>40) arrowPx++;
+  }
+  a.path=(path&&path.length)?path:[nb];
+  { const t0=performance.now(); while(performance.now()-t0<320); }   // eval 包在同步函数里，不能 await，就忙等
+  const later=snap();
+  const anim=marchAnimOn();
+  player=prevPlayer; selectedArmy=prevSel; started=prevStarted;
+  return { arrowPx, h1:sig(withP), h2:sig(later), anim, dest:nb };
+`);
+if (!arrows) {
+  console.log('  SKIP  没找到可以派出的军队');
+} else {
+  console.log(`  行军路线红箭头：只有画了路才会出现的红色像素 ${arrows.arrowPx} 个`);
+  check('行军路线上画出了红色箭头', arrows.arrowPx > 120, arrows.arrowPx);
+  check('红箭头是动的（两帧位置不同）', arrows.h2 !== arrows.h1, [arrows.h1, arrows.h2]);
+  check('选中军队有路径时会让画面持续刷新（否则箭头会冻住）', arrows.anim === true, arrows);
+}
+
 /* ---- 点城市：看到的那座城 = 点到的那座城（图标比省还大，不能只看光标下的像素） ---- */
 const pickCity = await p.eval(`
   ${VIEW}

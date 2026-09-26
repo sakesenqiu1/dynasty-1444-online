@@ -782,23 +782,27 @@ function zocMapFor(mover){
   return m;
 }
 /* 从 from 走到 to 允不允许（只看城防控制区这一条）。
-   控制区是**一堵墙**，不是减速带，规则只有三条：
+   控制区是**一堵墙**，不是减速带，规则只有四条：
      1) 目标格不在任何敌方控制区里 → 随便走（这就是从控制区里退出来的路）；
-     2) 起点和终点被**同一座**要塞罩着 → 一律不许
-        （所以要塞本格永远进不去，外圈之间也不能横着穿）；
-     3) 从区外踏进控制区 → 只有「这一走的目的地就是它」才可以（贴上去围城）。
-        中途路过控制区一律挡住 —— 打下一座要塞，绝不会让旁边那座的控制区失效。
-   多座要塞叠在一起时，越过一层要一次行军：先开到外层外圈，下一次再开进去，
-   所以永远不会出现「够不着的铁乌龟」，只是要一步一步贴着打。 */
-function zocAllows(zoc,from,to,toIsDest){
+     2) **城市/要塞那一格**（有城防的省本身就是城市）→ 只能作为终点走进去：
+        军队到达城市所在地块就开始攻城（见 resolveSieges），但绝不能穿城而过；
+     3) 外圈之间不能横着穿（不能贴着城墙绕过去）；从外面踏进外圈，
+        只有两种情况允许：这一走的终点就是那一格（在墙根列阵），
+        或者这一走的终点是**这座要塞的城市格**（为了攻城而接近）。
+        其余一律挡住 —— 打下一座要塞，绝不会让旁边那座的控制区失效；
+     4) 站在城市格里的军队随时能退出来（撤围、撤退都靠这一条），不会被自己的墙困死。 */
+function zocAllows(zoc,from,to,dest){
   if(!zoc||!zoc.size) return true;
   const B=zoc.get(to);
   if(!B) return true;                       // 目标格不受敌方要塞控制
+  if(B.indexOf(to)>=0) return dest===to;    // 城市格：只能作为终点踏进去（到了就攻城）
   const A=zoc.get(from);
+  if(A&&A.indexOf(from)>=0) return true;    // 站在城市格上：随时能撤出来
   if(A){
-    for(let i=0;i<A.length;i++) if(B.indexOf(A[i])>=0) return false;
+    for(let i=0;i<A.length;i++) if(B.indexOf(A[i])>=0) return false;   // 同一座要塞的外圈之间不能横着走
   }
-  return toIsDest===true;                   // 踏进控制区：只能作为终点
+  // 外圈：可以在这里落脚，也可以为了打这座要塞而从外圈走向它的城市格
+  return dest===to || (dest>0&&B.indexOf(dest)>=0);
 }
 /* 这一步是被哪座要塞挡住的（用来告诉玩家「为什么过不去」） */
 function blockingFortFor(zoc,from,to){
@@ -808,7 +812,16 @@ function blockingFortFor(zoc,from,to){
   if(A) for(let i=0;i<A.length;i++) if(B.indexOf(A[i])>=0) return A[i];
   return B[0];
 }
-/* 站在这个省上，能围攻哪几座敌方要塞（外圈相邻的都算） */
+/* 这一格本身是不是敌方要塞（= 城市所在的地块）：是的话，站上去就开打 */
+function hostileFortAt(pid,mover){
+  const p=provinces[pid];
+  if(!p||!p.fort||!p.pix.length||!mover) return 0;
+  const holder=p.controller;
+  if(!holder||holder===mover) return 0;
+  if(!atWar(mover,holder)) return 0;
+  return pid;
+}
+/* 站在这个省上，它周围有哪些敌方要塞（只用于地图提示/测试，不再用它决定打谁） */
 function hostileFortsAt(pid,mover){
   const p=provinces[pid];
   if(!p||!mover) return null;
@@ -833,7 +846,7 @@ function findPath(from,to,mover){
   while(h<q.length){
     const u=q[h++];
     for(const v of provinces[u].nbrs){
-      if(prev[v]===-1&&zocAllows(zoc,u,v,v===to)){
+      if(prev[v]===-1&&zocAllows(zoc,u,v,to)){
         prev[v]=u;
         if(v===to){ const path=[]; let x=to; while(x!==from){path.push(x);x=prev[x];} return path.reverse(); }
         q.push(v);
@@ -933,26 +946,32 @@ function findNavalPath(fromPid,toPid){
   if(_navCache.size<600) _navCache.set(ck,path);
   return path.slice(); // 像素索引序列（含 endPx，不含 startPx）
 }
-/* 广度优先走到第一个满足 pred 的省（AI 找目标用）。
-   mover 给定时同样吃城防控制区：控制区里的省只有「它本身就是目标」才可以踏进去，
-   否则一律绕开 —— 和玩家走的是同一套规则。 */
-function bfsTo(start,pred,mover){
-  const zoc=mover?zocMapFor(mover):null;
+/* 广度优先走到第一个满足 pred 的省 —— **只用来挑目标，不管控制区**
+   （控制区要按「这一走的终点」来判定，而终点正是这里要找的东西，
+     所以路线一律交给 findPath 重算，见 routeToBesiege / aiMonthly）。 */
+function bfsTo(start,pred){
   const prev=new Int32Array(provinces.length).fill(-1); prev[start]=start;
   const q=[start]; let h=0;
   while(h<q.length){
     const u=q[h++];
     for(const v of provinces[u].nbrs){
       if(prev[v]===-1){
-        const hit=pred(provinces[v]);
-        if(!zocAllows(zoc,u,v,hit)) continue;
         prev[v]=u;
-        if(hit){ const path=[]; let x=v; while(x!==start){path.push(x);x=prev[x];} return path.reverse(); }
+        if(pred(provinces[v])){ const path=[]; let x=v; while(x!==start){path.push(x);x=prev[x];} return path.reverse(); }
         q.push(v);
       }
     }
   }
   return null;
+}
+/* 去打开路的那座要塞：先无视控制区找出最近的敌方城市格，再用正规寻路走进去。
+   城市格只允许作为行军终点踏入 —— 正好就是「到达城市所在地块，然后开始攻城」。 */
+function routeToBesiege(start,owner){
+  const way=bfsTo(start,q=>!!hostileFortAt(q.id,owner),0);
+  if(!way||!way.length) return null;
+  const dest=way[way.length-1];
+  if(dest===start) return null;                 // 已经站在城里了（围城中）
+  return findPath(start,dest,owner);
 }
 // 阵营本土距离（多源BFS：本国+附庸+宗主的全部省份为源，深度上限12跳）：
 // 用于远征后勤损耗与孤岛困军检测；不可达（孤岛/海外）返回 Map 中无该省
@@ -1165,22 +1184,23 @@ function tickDay(){
       if(a.prog>=HOP){
         a.prog=0;
         const nxt=a.path[0];
+        const last=a.path[a.path.length-1];      // 这一走的真正终点，控制区规则要看它
         const zoc=zocOfDay(a.owner);
         /* 每一步都重新校验控制区 —— 这是「打下要塞不等于旁边就通了」的关键：
            路径可能是城防出现之前算好的（AI 的路径、或者你在敌人修好城防之前下的令），
            绝不能凭一条旧路径穿墙。 */
-        if(nxt!==undefined&&zocAllows(zoc,a.prov,nxt,a.path.length===1)){
+        if(nxt!==undefined&&zocAllows(zoc,a.prov,nxt,last)){
           a.prov=a.path.shift();
         } else {
-          /* 撞墙了。如果墙根那一格本身可以落脚（外圈），AI 就直接开上去围攻它；
-             玩家的军队则原地停下并收到一句提示（让他自己决定打还是绕）。 */
-          const canStand=nxt!==undefined&&zocAllows(zoc,a.prov,nxt,true);
-          if(canStand&&!isHuman(a.owner)&&hostileFortsAt(nxt,a.owner)) a.path=[nxt];
-          else {
-            a.path=[];
-            const bf=blockingFortFor(zoc,a.prov,nxt);
-            if(bf&&isHuman(a.owner))
-              pushLog(`⛔ ${provinces[bf].name} 的城防控制区挡住了去路，必须先攻下这座要塞`,'war',a.owner);
+          /* 撞墙了。AI 改道去打挡住它的那座城（军队要开到城市所在地块才开打）；
+             玩家的军队原地停下并收到一句提示（让他自己决定打还是绕）。 */
+          a.path=[];
+          const bf=blockingFortFor(zoc,a.prov,nxt);
+          if(!isHuman(a.owner)&&bf){
+            const r=routeToBesiege(a.prov,a.owner);
+            if(r&&r.length) a.path=r;
+          } else if(bf){
+            pushLog(`⛔ ${provinces[bf].name} 的城防控制区挡住了去路，必须先攻下这座要塞`,'war',a.owner);
           }
         }
       }
@@ -1219,7 +1239,7 @@ function bfsHome(start,owner){
       if(prev[v]!==-1) continue;
       const qp=provinces[v];
       const home=qp.owner===owner||qp.controller===owner;
-      if(!zocAllows(zoc,u,v,home)) continue;
+      if(!zocAllows(zoc,u,v,home?v:0)) continue;
       if(home){
         // 找到一块本方领土，路径回到这一块
         prev[v]=u;
@@ -1280,9 +1300,9 @@ function resolveBattles(){
 }
 
 /* ---------- 围城 ----------
-   要塞那一格敌军进不去，所以是**站在外圈围攻要塞**：
-   一支敌军只要站在某座敌方要塞的外圈上，围的就是那座要塞（等级最高的优先）。
-   外圈没有敌方要塞时，照旧围自己脚下的省。
+   **军队必须开进城市所在的那一块地，才能开始攻城**（见 zocAllows：城市格只允许作为行军终点踏入）。
+   站在旁边的外圈上不算攻城 —— 外圈只是列阵/过路的位置，不会自动去打邻居的城。
+   无城防的省照旧：走上去就围自己脚下这一省。
 
    每日进度 = 攻方兵力 / SIEGE_DIV / 城防倍率 × 运气
    城防倍率 = 1 + 等级 × FORT_SIEGE_FACTOR
@@ -1305,40 +1325,13 @@ function siegeDailyProgress(bstr,p){
   const rate=(eff/SIEGE_DIV)/(1+lv*FORT_SIEGE_FACTOR)*luck;
   return Math.min(cap, Math.max(floor, rate));
 }
-/* 攻城目标：脚下有敌方要塞就围它，否则围脚下的省。
-   同时挨着好几座要塞时（两个要塞的外圈叠在一起很常见），选**离这支军队最近**的那一座，
-   等级只用来打破平手 —— 否则会出现「军队明明停在 A 城堡下，被打下来的却是隔壁的 B 城」，
-   也就是玩家看到的「占错城」。 */
-function siegeTargetFor(pid,owner,ax,ay){
-  const list=hostileFortsAt(pid,owner);
-  if(!list) return pid;
-  if(list.length===1) return list[0];
-  if(ax===undefined||ax===null||ay===undefined||ay===null){
-    let best=list[0];
-    for(const f of list) if((provinces[f].fort||0)>(provinces[best].fort||0)) best=f;
-    return best;
-  }
-  // 距离用省中心算；东西环绕，跨接缝要取近的那一份
-  const d2=f=>{
-    const q=provinces[f];
-    let dx=(q.cx||0)-ax, dy=(q.cy||0)-ay;
-    if(dx>COLS/2) dx-=COLS; else if(dx<-COLS/2) dx+=COLS;
-    return dx*dx+dy*dy;
-  };
-  let best=list[0], bd=d2(best), bl=provinces[best].fort||0;
-  for(const f of list){
-    const d=d2(f), l=provinces[f].fort||0;
-    if(d<bd-1e-9||(Math.abs(d-bd)<=1e-9&&l>bl)){ best=f; bd=d; bl=l; }
-  }
-  return best;
-}
+/* 攻城目标 = **脚下这一省**。
+   要塞的城市格是可以走进去的（见 zocAllows），军队到达城市所在地块才开打；
+   站在旁边的外圈上不算攻城 —— 那里只是列阵/过路的位置，不会自动去打邻居的城。 */
 function resolveSieges(){
-  // 先按「实际围攻的目标省」归集：站在外圈的军队，围攻的是那座要塞
   const byProv=new Map();
   for(const a of armies){
-    const ap=provinces[a.prov];
-    // 传军队所在的坐标：外圈同时挨着两座要塞时，围的是离它最近的那一座
-    const tgt=siegeTargetFor(a.prov,a.owner,ap?ap.cx:null,ap?ap.cy:null);
+    const tgt=a.prov;
     let l=byProv.get(tgt); if(!l){l=[];byProv.set(tgt,l);} l.push(a);
   }
   for(const [pid,list] of byProv){
@@ -1802,8 +1795,8 @@ function aiMonthly(){
         continue;
       }
       if(a.path.length){ a.noTgt=0; continue; }
-      // 已经贴在某座敌方要塞的外圈上 → 就地围攻，别再改道去别处（不然永远打不下要塞）
-      if(hostileFortsAt(a.prov,a.owner)){ a.noTgt=0; continue; }
+      // 已经站在敌方要塞的城市格上 → 就地攻城，别再改道（不然永远打不下要塞）
+      if(hostileFortAt(a.prov,a.owner)){ a.noTgt=0; continue; }
       if(myWars.length){
         const p=provinces[a.prov];
         // 选择与本军所在省相关的战争：省属于哪个敌国（或其附庸）就蚕食谁；
@@ -1838,11 +1831,14 @@ function aiMonthly(){
             const path=findPath(a.prov,invProv,a.owner);
             if(path&&path.length){ a.path=path; continue; }
           }
-          const path=bfsTo(a.prov,q=>q.owner===foe||q.controller===foe,a.owner);
-          if(path) a.path=path;
+          /* 先用「不管控制区」的 BFS 挑目标，再用正规寻路走过去：
+             这样路一定是合法路线；走不通说明被敌方要塞挡住了。 */
+          const way=bfsTo(a.prov,q=>q.owner===foe||q.controller===foe,0);
+          const path=way&&way.length?findPath(a.prov,way[way.length-1],a.owner):null;
+          if(path&&path.length) a.path=path;
           else {
-            // 陆路被敌方城防控制区挡死 → 不绕路、不穿墙，改为开过去围攻最近的那座要塞外圈
-            const siegePath=bfsTo(a.prov,q=>hostileFortsAt(q.id,a.owner)!==null,a.owner);
+            // 陆路被城防挡死 → 不绕路、不穿墙，改为开过去打那座要塞（攻下才能通行）
+            const siegePath=routeToBesiege(a.prov,a.owner);
             if(siegePath) a.path=siegePath;
           }
         }
@@ -2681,7 +2677,7 @@ if(typeof module!=='undefined'&&module.exports){
     FORT_MAX,FORT_GARRISON,FORT_SIEGE_FACTOR,FORT_MAX_ADV,FORT_LUCK,FORT_MIN_DAYS,FORT_MIN_FRAC,
     BARRACKS_COST,BARRACKS_DAYS,FORT_COST,FORT_DAYS,BUILD_NAMES,
     ensureProvinceBuildings,garrisonOf,buildCost,buildDays,buildBuilding,demolishBuilding,tickBuild,
-    zocMapFor,zocAllows,hostileFortsAt,siegeTargetFor,siegeDailyProgress,
+    zocMapFor,zocAllows,hostileFortAt,hostileFortsAt,blockingFortFor,routeToBesiege,siegeDailyProgress,
     tickDay,advanceDay,mergeArmies,resolveBattles,resolveSieges,monthlyTick,economy,aiMonthly,
     declareWar,makePeace,transferProvince,checkDeath,vassalize,releaseStaleOccupations,
     warScore,peaceCost,releaseCost,canDemandProvince,occRatio,atWar,inWar,truceBetween,truceKey,

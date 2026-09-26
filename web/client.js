@@ -1076,6 +1076,8 @@ function recruitSig(){
 function needsRender(t){
   const k = cam.x.toFixed(3)+'|'+cam.y.toFixed(3)+'|'+cam.z.toFixed(4)+'|'+cw+'|'+ch+'|'+dpr+'|'+
     labelEpoch+'|'+selectedProv+'|'+selectedArmy+'|'+mapMode+'|'+_armyVer+'|'+recruitSig()+'|'+lodTier+'|'+
+    // 行军箭头是动画：量化到 50ms 一档，让路线每 20fps 重画一次（不量化的话暂停时会冻住）
+    (marchAnimOn()?((t/50)|0):0)+'|'+
     ((imgDirty?1:0)|(selDirty?2:0)|(bordDirty?8:0)|(cedeMap.on?(cedeDirty?4:0):(grantMap.on?(cedeDirty?4:0):16)));
   if(k!==_frameKey){ _frameKey=k; return true; }
   // 兜底：浏览器在后台可能丢弃画布内容，最多 3 秒强制重画一次
@@ -1593,6 +1595,64 @@ function drawRecruits(){
   }
   ctx.textAlign='left';
 }
+/* ---------- 行军路线：红色箭头特效 ----------
+   底下一层暗红描边（雪地/沙漠上也看得清），上面是流动的红色箭头，终点一个大箭头 + 光环。
+   箭头位置由 now 驱动，所以只要还有军队在行军，画面就得按固定节奏重画（见 marchAnimOn）。
+   全部手算顶点，不用 save/rotate/ellipse —— 单元测试里的 canvas 桩没有这些方法。 */
+function drawMarchArrows(pts,now){
+  if(!pts||pts.length<2) return;
+  const seg=[]; let total=0;
+  for(let i=1;i<pts.length;i++){
+    const dx=pts[i][0]-pts[i-1][0], dy=pts[i][1]-pts[i-1][1];
+    const len=Math.hypot(dx,dy);
+    seg.push({x0:pts[i-1][0],y0:pts[i-1][1],ux:dx/(len||1),uy:dy/(len||1),len});
+    total+=len;
+  }
+  if(total<2) return;
+  // ① 暗色底线 + 红色主线（round 头尾，路线看起来像一条绶带）
+  if(ctx.setLineDash) ctx.setLineDash([]);
+  const band=(w,col)=>{
+    ctx.strokeStyle=col; ctx.lineWidth=w; ctx.lineJoin='round'; ctx.lineCap='round';
+    ctx.beginPath(); ctx.moveTo(pts[0][0],pts[0][1]);
+    for(let i=1;i<pts.length;i++) ctx.lineTo(pts[i][0],pts[i][1]);
+    ctx.stroke();
+  };
+  band(6.0,'rgba(28,4,2,0.40)');
+  band(3.2,'rgba(224,46,34,0.78)');
+  // ② 流动的红色箭头
+  const SP=24, speed=36;                       // 间距 24px，每秒推进 36px
+  const phase=((now*0.001*speed)%SP+SP)%SP;
+  const tri=(x,y,ux,uy,s,alpha)=>{
+    const px=-uy, py=ux;                       // 垂直方向
+    ctx.beginPath();
+    ctx.moveTo(x+ux*s,y+uy*s);
+    ctx.lineTo(x-ux*s*0.72+px*s*0.70,y-uy*s*0.72+py*s*0.70);
+    ctx.lineTo(x-ux*s*0.72-px*s*0.70,y-uy*s*0.72-py*s*0.70);
+    ctx.closePath();
+    ctx.fillStyle=`rgba(255,74,54,${alpha})`; ctx.fill();
+    ctx.strokeStyle=`rgba(58,6,2,${alpha*0.85})`; ctx.lineWidth=1.1; ctx.stroke();
+  };
+  let acc=0,k=0;
+  for(let d=phase;d<total;d+=SP){
+    while(k<seg.length-1&&acc+seg[k].len<d){ acc+=seg[k].len; k++; }
+    const s=seg[k], u=d-acc;
+    if(u>s.len) continue;
+    const fade=0.40+0.55*Math.min(1,d/Math.max(1,total*0.8));
+    tri(s.x0+s.ux*u,s.y0+s.uy*u,s.ux,s.uy,6.4,fade);
+  }
+  // ③ 终点大箭头（呼吸）+ 光环
+  const last=seg[seg.length-1];
+  const end=pts[pts.length-1];
+  const pulse=1+0.15*Math.sin(now*0.006);
+  tri(end[0],end[1],last.ux,last.uy,10.0*pulse,0.95);
+  ctx.beginPath(); ctx.arc(end[0],end[1],8+2.4*Math.sin(now*0.005),0,6.2832);
+  ctx.strokeStyle='rgba(255,96,72,0.7)'; ctx.lineWidth=1.7; ctx.stroke();
+}
+// 是否有「正在行军的选中军队」：有的话箭头要动，必须让帧指纹每 50ms 变一次
+function marchAnimOn(){
+  const a=armies.find(x=>x.id===selectedArmy);
+  return !!(a&&a.owner===player&&!a.isNavy&&a.path&&a.path.length);
+}
 function drawArmies(){
   const c0=countries[player];
   // 选中军队路径
@@ -1609,11 +1669,21 @@ function drawArmies(){
       }
       ctx.stroke(); ctx.setLineDash([]);
     } else if(sa.path.length){
-      ctx.strokeStyle='rgba(255,215,120,0.85)'; ctx.lineWidth=2; ctx.setLineDash([6,5]);
-      ctx.beginPath();
-      let [px,py]=w2s(...armyPos(sa)); ctx.moveTo(px,py);
-      for(const pid of sa.path){ const p=provinces[pid]; const [x,y]=w2s(nearX(p.cx),p.cy); ctx.lineTo(x,y); }
-      ctx.stroke(); ctx.setLineDash([]);
+      // 陆路：红色箭头特效（沿省份中心连线，动画由 performance.now 驱动）
+      const pts=[];
+      { const [px,py]=w2s(...armyPos(sa)); pts.push([px,py]); }
+      for(const pid of sa.path){ const p=provinces[pid]; if(!p) continue; const [x,y]=w2s(nearX(p.cx),p.cy); pts.push([x,y]); }
+      drawMarchArrows(pts,performance.now());
+      // 终点画一个行军目标环，一眼看出这一走要打到哪
+      const end=pts[pts.length-1];
+      if(end){ const pl=sa.path[sa.path.length-1], pp=provinces[pl];
+        if(pp){ const own=countries[pp.controller]||countries[pp.owner];
+          if(own&&pp.controller!==sa.owner){
+            ctx.beginPath(); ctx.arc(end[0],end[1],13,0,6.2832);
+            ctx.strokeStyle='rgba(255,70,50,0.55)'; ctx.lineWidth=1.6; ctx.stroke();
+          }
+        }
+      }
     }
   }
   // 先剔除视野外的军队；文字描边（strokeText）非常贵，
@@ -2898,6 +2968,16 @@ function infoTab(){
       <div class="row"><span>所属</span>${countries[a.owner].name}</div>
       <div class="row"><span>位置</span>${loc.name}</div>
       <div class="row"><span>状态</span>${status}</div>`;
+    /* 新规则：必须开进城市所在的那一块地才开打（站在外圈不算）。
+       军队正好停在城外时，直接给一个「开进城里攻城」的按钮，免得玩家以为是 bug。 */
+    if(!a.isNavy&&a.owner===player&&!hostileFortAt(a.prov,a.owner)){
+      const near=hostileFortsAt(a.prov,a.owner);
+      if(near&&near.length){
+        const tg=near.map(f=>provinces[f]).filter(x=>x).sort((x,y)=>(y.fort||0)-(x.fort||0))[0];
+        if(tg) h+=`<div class="row"><span>城外</span><span class="hint">旁边就是 <b>${tg.name}</b>（城防 Lv.${tg.fort}）：<b>必须开进这一格才能攻城</b>，站在外圈不算</span></div>
+          <div><button class="act" style="background:#3a1c18;border-color:#a05040;color:#f0b0a0" data-act="assault" data-v="${a.id}" data-p="${tg.id}">⚔ 开进 ${tg.name} 攻城</button></div>`;
+      }
+    }
     if(a.owner===player) h+=`<div><button class="act danger" data-act="disband" data-v="${a.id}">解散${a.isNavy?'舰队':'军团'}</button></div>`;
     h+=`<p class="hint">${a.isNavy?'选中后点击地图任意海岸省份下达航行令，右键取消。':'选中后点击地图任意省份下达行军令，右键取消。'}</p><div class="sep"></div>`;
   }
@@ -2917,7 +2997,8 @@ function infoTab(){
       if(p.barracks) parts.push('<span style="color:#a8d8a0">🏛 兵营</span>');
       if(p.fort) parts.push(`<span style="color:#e8c86a">🏯 城防 Lv.${p.fort}</span>`);
       h+=`<div class="row"><span>建筑</span>${parts.length?parts.join(' · '):'—'}</div>`;
-      if(p.fort) h+=`<div class="row"><span>驻军</span>${garrisonOf(p)} 人 · <span class="hint">外圈 ${p.nbrs.length} 省为控制区，敌军不能横穿</span></div>`;
+      if(p.fort) h+=`<div class="row"><span>驻军</span>${garrisonOf(p)} 人</div>`;
+      if(p.fort) h+=`<div class="row"><span>城防规则</span><span class="hint">外圈 ${p.nbrs.length} 省为控制区，敌军只能路过之外绕行、不能横穿；<b>敌军必须开进本省（城市所在地块）才能攻城</b>，站在外圈不算</span></div>`;
       if(p.barracks) h+=`<div class="row"><span>兵营效果</span>驻扎本省的军队维护费 <b>减半</b></div>`;
     }
     if(p.owner===player){
@@ -2955,7 +3036,7 @@ function infoTab(){
           if(p.barracks) h+=`<button class="act" style="background:#1e2e1c;border-color:#5a8a50;color:#b8e0a8" data-act="demolish" data-v="${p.id}" data-k="barracks" title="拆掉兵营，退回一半造价">🏛 拆除兵营（+${Math.floor(BARRACKS_COST/2)}金）</button>`;
           else h+=`<button class="act" style="background:#1e2e1c;border-color:#5a8a50;color:#b8e0a8" data-act="build-barracks" data-v="${p.id}" ${c.gold>=bcst?'':'disabled'} title="驻扎在本省的军队维护费减半。本省被敌人占领时失效。">🏛 建造兵营（${bcst}金 · ${Math.ceil(BARRACKS_DAYS/30)}个月 · 驻扎军队维护费减半）</button>`;
           if(p.fort>=FORT_MAX) h+=`<button class="act" style="background:#2e2a18;border-color:#8a7a40;color:#e8d8a0" data-act="demolish" data-v="${p.id}" data-k="fort" title="拆掉一级城防，退回一半造价">🏯 拆除一级城防 Lv.${p.fort}（+${Math.floor((FORT_COST[p.fort]||0)/2)}金）</button>`;
-          else h+=`<button class="act" style="background:#2e2a18;border-color:#8a7a40;color:#e8d8a0" data-act="build-fort" data-v="${p.id}" ${c.gold>=fcst?'':'disabled'} title="每级 +1000 驻军；外圈一圈成为控制区，敌军不能横穿。最短围城 ${FORT_MIN_DAYS[p.fort+1]} 天，堆多少兵都绕不过去。">🏯 ${p.fort?`升级城防 Lv.${p.fort} → Lv.${p.fort+1}`:`建造城防 Lv.1`}（${fcst}金 · ${Math.ceil((FORT_DAYS[p.fort+1]||0)/30)}个月 · 驻军 ${(p.fort+1)*FORT_GARRISON}）</button>`;
+          else h+=`<button class="act" style="background:#2e2a18;border-color:#8a7a40;color:#e8d8a0" data-act="build-fort" data-v="${p.id}" ${c.gold>=fcst?'':'disabled'} title="每级 +1000 驻军；外圈一圈成为控制区，敌军不能横穿。敌人必须开进本省才能攻城（站在外圈打不下来）。最短围城 ${FORT_MIN_DAYS[p.fort+1]} 天，堆多少兵都绕不过去。">🏯 ${p.fort?`升级城防 Lv.${p.fort} → Lv.${p.fort+1}`:`建造城防 Lv.1`}（${fcst}金 · ${Math.ceil((FORT_DAYS[p.fort+1]||0)/30)}个月 · 驻军 ${(p.fort+1)*FORT_GARRISON}）</button>`;
           if(p.fort>0) h+=`<button class="act" data-act="demolish" data-v="${p.id}" data-k="fort" title="拆掉一级城防，退回一半造价">🧨 拆除一级城防</button>`;
           h+=`</div>`;
         }
@@ -3169,6 +3250,7 @@ document.addEventListener('click',e=>{
     case 'recruit': doRecruit(+v); break;
     case 'recruit-navy': doRecruitNavy(+v); break;
     case 'disband': if(MP.online){ mpCmd({c:'disband',army:+v}); break; } armies=armies.filter(a=>a.id!==+v); if(selectedArmy===+v)selectedArmy=0; refreshPanel(); break;
+    case 'assault': doAssault(+v,+el.dataset.p); break;
     case 'declare': doDeclare(+v); break;
     case 'found-vassal': {
       const p=provinces[+v];
@@ -3355,6 +3437,16 @@ function doBuild(pid,kind){
   if(err){ pushLog('建造失败：'+err,'war'); return; }
   labelsDirty=true; _bldEpoch++;
   recolorProvAndNbrs(pid);      // 城防要换地图模型，兵营也要刷新面板
+  refreshPanel();
+}
+/* 开进城里攻城：一键把军队派到城市所在地块（到那儿才开始围城） */
+function doAssault(armyId,pid){
+  const a=armies.find(x=>x.id===armyId), p=provinces[pid];
+  if(!a||!p||a.isNavy) return;
+  if(MP.online) return mpCmd({c:'path',army:a.id,to:pid});
+  const path=findPath(a.prov,pid,a.owner);
+  if(path&&path.length){ a.path=path; a.prog=0; a.dstProv=pid; }
+  else pushLog(`${p.name} 打不通：先解决挡路的城防`,'war');
   refreshPanel();
 }
 function doRecruitNavy(pid){
@@ -3792,7 +3884,7 @@ function handleClick(sx,sy){
         const path=findPath(a.prov,pid,a.owner);
         if(path){ a.path=path; a.prog=0; }
         else pushLog(findPath(a.prov,pid,0)
-          ? '打不通：路上有敌方城防，必须先把它攻下来（城防外圈禁止敌军横穿）'
+          ? '打不通：路上有敌方城防（城防外圈禁止敌军横穿），必须先把它攻下来'
           : '无法找到通往该省的陆路');
       }
     }
