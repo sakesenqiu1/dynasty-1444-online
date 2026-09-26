@@ -99,12 +99,201 @@ let imgData=pctx.createImageData(COLS,ROWS);
   const r=parseInt(SEA.slice(1,3),16), g=parseInt(SEA.slice(3,5),16), b=parseInt(SEA.slice(5,7),16);
   for(let i=0;i<d.length;i+=4){ d[i]=r; d[i+1]=g; d[i+2]=b; d[i+3]=255; }
 })();
+
+/* =====================================================================
+   二·B 地形底纹 / 浅海 / 城镇
+   ---------------------------------------------------------------------
+   纯外观层。地球栅格（land / provOf）由固定种子生成，所以这里也用固定
+   种子的值噪声推演高程、湿度与水深：两端各算各的，结果必然一致，
+   既不进存档也不需要任何网络传输。
+   代价只在世界建好后的第一次着色付一遍（约 0.1 秒，仍在加载页里），
+   之后每像素只多一次查表 + 三次乘加。
+   ===================================================================== */
+
+/* 固定种子的值噪声（平滑插值）。与 rnd() 完全无关，不影响世界生成 */
+function vnoise(x,y,s){
+  const xi=Math.floor(x), yi=Math.floor(y);
+  const xf=x-xi, yf=y-yi;
+  const u=xf*xf*(3-2*xf), v=yf*yf*(3-2*yf);
+  const h=(a,b)=>(hash32(Math.imul(a,73856093)^Math.imul(b,19349663)^s)>>>8)/16777216;
+  const n00=h(xi,yi), n10=h(xi+1,yi), n01=h(xi,yi+1), n11=h(xi+1,yi+1);
+  return (n00+(n10-n00)*u)*(1-v)+(n01+(n11-n01)*u)*v;
+}
+/* 多倍频叠加。ridge=true 改用「脊状」噪声，山系会连成山脉而不是一团团土包 */
+function fbmN(x,y,oct,s,ridge){
+  let a=0.5,f=1,sum=0,nrm=0;
+  for(let i=0;i<oct;i++){
+    const n=vnoise(x*f,y*f,s+i*1013);
+    sum+=a*(ridge?1-Math.abs(2*n-1):n); nrm+=a; a*=0.5; f*=2;
+  }
+  return sum/nrm;
+}
+
+/* 每类地形一组调色：[R,G,B 乘数, R,G,B 加数]
+   乘数管明暗冷暖，加数管沙/雪/植被染色；四级坡向再乘一次明暗 */
+const TERR_BIOME=[
+  [1.00,1.00,1.00,  0, 0, 0],   // 0 不调制（海面 / 未定）
+  [1.03,1.02,0.93,  5, 6, 0],   // 1 平原
+  [1.08,1.03,0.87, 13,10, 0],   // 2 草原
+  [0.89,1.00,0.85,  0,10, 0],   // 3 森林
+  [0.80,0.98,0.77,  0,17, 3],   // 4 雨林
+  [1.13,1.06,0.81, 28,21, 4],   // 5 沙漠
+  [0.96,0.94,0.88,  5, 4, 2],   // 6 丘陵
+  [0.82,0.81,0.78, 10, 9, 8],   // 7 山地
+  [0.74,0.77,0.83, 50,52,56],   // 8 雪峰
+  [0.86,0.97,0.91,  0, 8,10],   // 9 针叶林
+  [0.97,0.99,1.03, 17,19,22],   // 10 苔原
+  [0.87,0.95,0.87,  0,10, 6],   // 11 沼泽
+  [1.07,1.00,0.84, 15,11, 0],   // 12 稀树草原
+];
+const TERR_SHADE=[0.86,0.92,0.98,1.04,1.10,1.16];   // 坡向明暗（西北来光）
+const TERR_TAB=(()=>{
+  const t=new Float32Array(TERR_BIOME.length*TERR_SHADE.length*6);
+  for(let b=0;b<TERR_BIOME.length;b++){
+    const s=TERR_BIOME[b];
+    for(let k=0;k<TERR_SHADE.length;k++){
+      const o=(b*TERR_SHADE.length+k)*6, m=TERR_SHADE[k];
+      t[o]=s[0]*m; t[o+1]=s[1]*m; t[o+2]=s[2]*m;
+      t[o+3]=s[3]; t[o+4]=s[4]; t[o+5]=s[5];
+    }
+  }
+  return t;
+})();
+const TERR_NAMES=['—','平原','草原','森林','雨林','沙漠','丘陵','山地','雪峰','针叶林','苔原','沼泽','稀树草原'];
+let terrIdx=null;                              // Uint8Array(NPIX)：生态*6+坡向，0=不调制
+const COAST_SAND=[214,198,158];
+
+/* 浅海分带：近岸亮、远洋暗。相邻两档只差一点点，才是一条柔和的近岸渐变
+   而不是套在海岸线上的亮蓝圈 */
+const TERR_SHADES=TERR_SHADE.length;
+const SEA_BANDS=[[0x46,0x72,0x9c],[0x3a,0x61,0x88],[0x32,0x52,0x74]];
+const SEA_DEEP=[0x2a,0x42,0x60];
+
+/* 多源 BFS：从「贴着陆地的海面」出发，得到近岸水深（截断 9 层） */
+function buildSeaDepth(){
+  const depth=new Uint8Array(NPIX);
+  const q=new Int32Array(NPIX); let qh=0,qt=0;
+  for(let i=0;i<NPIX;i++){
+    if(provOf[i]) continue;
+    const r=(i/COLS)|0, c=i%COLS;
+    if((c+1<COLS&&provOf[i+1])||(c>0&&provOf[i-1])||
+       (r+1<ROWS&&provOf[i+COLS])||(r>0&&provOf[i-COLS])){ depth[i]=1; q[qt++]=i; }
+  }
+  while(qh<qt){
+    const i=q[qh++], nd=depth[i]+1; if(nd>9) continue;
+    const r=(i/COLS)|0, c=i%COLS;
+    if(c+1<COLS){ const j=i+1; if(!provOf[j]&&!depth[j]){ depth[j]=nd; q[qt++]=j; } }
+    if(c>0){ const j=i-1; if(!provOf[j]&&!depth[j]){ depth[j]=nd; q[qt++]=j; } }
+    if(r+1<ROWS){ const j=i+COLS; if(!provOf[j]&&!depth[j]){ depth[j]=nd; q[qt++]=j; } }
+    if(r>0){ const j=i-COLS; if(!provOf[j]&&!depth[j]){ depth[j]=nd; q[qt++]=j; } }
+  }
+  return depth;
+}
+/* 多源 BFS：从「贴着陆地的海面」向陆地内侧走，得到离海距离（2=滨海） */
+function buildLandCoast(){
+  const d=new Uint8Array(NPIX);
+  const q=new Int32Array(NPIX); let qh=0,qt=0;
+  for(let i=0;i<NPIX;i++){
+    if(provOf[i]) continue;
+    const r=(i/COLS)|0, c=i%COLS;
+    if((c+1<COLS&&provOf[i+1])||(c>0&&provOf[i-1])||
+       (r+1<ROWS&&provOf[i+COLS])||(r>0&&provOf[i-COLS])){ d[i]=1; q[qt++]=i; }
+  }
+  while(qh<qt){
+    const i=q[qh++], nd=d[i]+1; if(nd>8) continue;
+    const r=(i/COLS)|0, c=i%COLS;
+    if(c+1<COLS){ const j=i+1; if(provOf[j]&&!d[j]){ d[j]=nd; q[qt++]=j; } }
+    if(c>0){ const j=i-1; if(provOf[j]&&!d[j]){ d[j]=nd; q[qt++]=j; } }
+    if(r+1<ROWS){ const j=i+COLS; if(provOf[j]&&!d[j]){ d[j]=nd; q[qt++]=j; } }
+    if(r>0){ const j=i-COLS; if(provOf[j]&&!d[j]){ d[j]=nd; q[qt++]=j; } }
+  }
+  return d;
+}
+/* 生态判定：e=高程(0..1) m=湿度(0..1) wl=纬度绝对值(度) cd=离海距离 */
+function biomeOf(e,m,wl,cd){
+  if(wl>70) return 8;                           // 极地冰盖
+  if(e>0.86) return 8;                          // 雪峰
+  if(e>0.72) return 7;                          // 山地
+  if(e>0.58) return wl>50?9:6;                  // 高地：针叶林 / 丘陵
+  if(wl>62) return 10;                          // 苔原
+  if(wl>52) return m>0.42?9:10;
+  if(cd>0&&cd<=2&&m>0.72&&e<0.36) return 11;    // 沼泽
+  if(wl<30&&m<0.36) return 5;                   // 沙漠（回归线干旱带）
+  if(wl<45&&m<0.29) return 5;
+  if(m<0.46) return wl<32?12:2;                 // 稀树草原 / 草原
+  if(wl<22&&m>0.70) return 4;                   // 雨林
+  if(m>0.62) return 3;                          // 森林
+  return 1;                                     // 平原
+}
+let _terrMs=0, _terrHist=null;
+function ensureTerrain(){
+  if(terrIdx||!provOf||!provinces||provinces.length<2) return;
+  const t0=performance.now();
+  const elevA=new Float32Array(NPIX);
+  const biome=new Uint8Array(NPIX);
+  const coast=buildLandCoast();
+  for(let i=1;i<provinces.length;i++){
+    const p=provinces[i]; if(!p||!p.pix.length) continue;
+    for(const idx of p.pix){
+      const r=(idx/COLS)|0, c=idx%COLS;
+      const wl=Math.abs(90-(r+0.5)*0.25);
+      let e=0.58*fbmN(c/38,r/38,3,7717,true)+0.42*fbmN(c/23,r/23,3,3391,false);
+      e=(e-0.42)*2.35; if(e<0)e=0; else if(e>1)e=1;
+      elevA[idx]=e;
+      // 湿度：赤道多雨、副热带干旱、中纬多雨 → 沙漠自动落在南北回归线一带
+      const latM=0.5+0.30*Math.cos(wl*Math.PI/25);
+      let m=latM*0.62+fbmN(c/57,r/57,3,9091,false)*0.72-0.26;
+      if(m<0)m=0; else if(m>1)m=1;
+      biome[idx]=biomeOf(e,m,wl,coast[idx]);
+    }
+  }
+  // 坡向明暗：邻格必须是陆地，否则海岸会凭空出现一圈陡坎
+  terrIdx=new Uint8Array(NPIX);
+  for(let i=1;i<provinces.length;i++){
+    const p=provinces[i]; if(!p||!p.pix.length) continue;
+    for(const idx of p.pix){
+      const r=(idx/COLS)|0, c=idx%COLS;
+      const l =(c>0      &&provOf[idx-1])   ?elevA[idx-1]   :elevA[idx];
+      const rr=(c+1<COLS &&provOf[idx+1])   ?elevA[idx+1]   :elevA[idx];
+      const u =(r>0      &&provOf[idx-COLS])?elevA[idx-COLS]:elevA[idx];
+      const dn=(r+1<ROWS &&provOf[idx+COLS])?elevA[idx+COLS]:elevA[idx];
+      let k=2.5-((rr-l)+(dn-u))*3.0;            // 西北来光
+      if(k<0)k=0; else if(k>TERR_SHADES-1)k=TERR_SHADES-1;
+      terrIdx[idx]=biome[idx]*TERR_SHADES+(k|0);
+    }
+  }
+  // 海面：按水深分带，整体再随纬度略作明暗
+  const sd=buildSeaDepth();
+  const d=imgData.data;
+  for(let r=0;r<ROWS;r++){
+    const wl=Math.abs(90-(r+0.5)*0.25)/90, kk=1-0.12*wl*wl;
+    for(let c=0;c<COLS;c++){
+      const i=r*COLS+c; if(provOf[i]) continue;
+      const dep=sd[i]-2;                         // 1 = 紧贴海岸
+      const col=(dep>=0&&dep<SEA_BANDS.length)?SEA_BANDS[dep]:SEA_DEEP;
+      const o=i*4;
+      d[o]=col[0]*kk; d[o+1]=col[1]*kk; d[o+2]=col[2]*kk; d[o+3]=255;
+    }
+  }
+  _terrMs=performance.now()-t0;
+  // 各生态占比：性能面板与自动化测试都用得上
+  const hist=new Array(TERR_BIOME.length).fill(0);
+  for(let i=1;i<provinces.length;i++){
+    const p=provinces[i]; if(!p||!p.pix.length) continue;
+    for(const idx of p.pix) hist[(terrIdx[idx]/TERR_SHADES)|0]++;
+  }
+  _terrHist=hist;
+  imgDirty=true; imgBox=null;
+}
+
 const selCv=document.createElement('canvas'); selCv.width=COLS; selCv.height=ROWS;
 const sctx=selCv.getContext('2d');
 let selData=sctx.createImageData(COLS,ROWS);
 let imgDirty=true, selDirty=true;
 /* 重绘调度状态：必须在 applyRenderScale / resize 之前声明 */
 let _frameKey='', _lastRealRender=0, _labelHasContent=false;
+/* 城镇层状态：applyRenderScale 也要用到 townKey，同样必须先声明 */
+let townKey='', _townHasContent=false, _townWorld=null, _townCount=0;
 
 /* ---------- 标签层缓存 ----------
    国家名/省名是静态的，但原来每帧都用 strokeText+fillText 重画上百个文字，
@@ -269,6 +458,7 @@ function applyRenderScale(){
   mapCv.height = Math.max(1, Math.round(ch*s));
   mapCv.style.width = cw+'px'; mapCv.style.height = ch+'px';
   labelKey='';                 // 标签层分辨率变了，缓存作废
+  townKey='';                  // 城镇层同理
   _frameKey='';                // 强制重画一帧
 }
 function resize(){
@@ -325,6 +515,14 @@ function provFill(p){
   return [c.color[0]*p.varF,c.color[1]*p.varF,c.color[2]*p.varF];
 }
 function setPx(idx,r,g,b){ const o=idx*4, d=imgData.data; d[o]=r|0; d[o+1]=g|0; d[o+2]=b|0; d[o+3]=255; }
+/* 带地形调制的写入：国色 × 生态色 × 坡向明暗 → 有地貌的底图。
+   imgData.data 是 Uint8ClampedArray，越界会自动截断，不必手动 clamp。 */
+function setPxT(idx,r,g,b){
+  const t=terrIdx;
+  if(!t){ setPx(idx,r,g,b); return; }
+  const k=t[idx]*6, m=TERR_TAB, o=idx*4, d=imgData.data;
+  d[o]=r*m[k]+m[k+3]; d[o+1]=g*m[k+1]+m[k+4]; d[o+2]=b*m[k+2]+m[k+5]; d[o+3]=255;
+}
 
 /* ---------- 脏矩形 ----------
    原来只要有一个省变色，渲染时就把整幅 1440×720（约 4MB）重新 putImageData，
@@ -359,23 +557,24 @@ function recolorProvince(pid){
   for(const idx of p.pix){
     if(occupied){
       const r=Math.floor(idx/COLS), c=idx%COLS;
-      if((r+c)%6<3) setPx(idx,f[0],f[1],f[2]);
-      else setPx(idx,of[0],of[1],of[2]);
-    } else setPx(idx,f[0],f[1],f[2]);
+      if((r+c)%6<3) setPxT(idx,f[0],f[1],f[2]);
+      else setPxT(idx,of[0],of[1],of[2]);
+    } else setPxT(idx,f[0],f[1],f[2]);
   }
+  // 海岸：朝海那一列像素压成浅沙色，和深色海面接在一起就是一条海岸线
+  const cs=COAST_SAND;
   for(const idx of p.coastPix){
-    if(occupied){
-      const r=Math.floor(idx/COLS), c=idx%COLS;
-      if((r+c)%6<3) setPx(idx,f[0]*0.5,f[1]*0.5,f[2]*0.5);
-      else setPx(idx,of[0]*0.5,of[1]*0.5,of[2]*0.5);
-    } else setPx(idx,f[0]*0.5,f[1]*0.5,f[2]*0.5);
+    let u=f;
+    if(occupied){ const r=Math.floor(idx/COLS), c=idx%COLS; if((r+c)%6>=3) u=of; }
+    setPx(idx,u[0]*0.55+cs[0]*0.45,u[1]*0.55+cs[1]*0.45,u[2]*0.55+cs[2]*0.45);
   }
   for(const [q,arr] of p.borderPix){
     const qp=provinces[q];
     const strong=qp&&qp.controller!==p.controller;
     for(const idx of arr){
-      if(strong) setPx(idx,24,22,20);
-      else setPx(idx,f[0]*0.8,f[1]*0.8,f[2]*0.8);
+      // 控制权不同 → 一条压深的国界线；同国省界只是浅浅一道
+      if(strong) setPxT(idx,f[0]*0.30,f[1]*0.30,f[2]*0.30);
+      else setPxT(idx,f[0]*0.8,f[1]*0.8,f[2]*0.8);
     }
   }
   imgDirty=true;
@@ -385,7 +584,7 @@ function recolorProvAndNbrs(pid){
   const p=provinces[pid];
   if(p) for(const q of p.nbrs) recolorProvince(q);
 }
-function recolorAll(){ for(let i=1;i<provinces.length;i++) recolorProvince(i); imgDirty=true; imgBox=null; }
+function recolorAll(){ ensureTerrain(); for(let i=1;i<provinces.length;i++) recolorProvince(i); imgDirty=true; imgBox=null; }
 
 function updateSelOverlay(){
   selData=new ImageData(COLS,ROWS);
@@ -637,10 +836,15 @@ function render(t){
   _msPut=_msPut*0.85+(performance.now()-_t)*0.15; _t=performance.now();
   const tx=(cw/2-cam.x*cam.z)*dpr, ty=(ch/2-cam.y*cam.z)*dpr;
   ctx.setTransform(cam.z*dpr,0,0,cam.z*dpr,tx,ty);
-  ctx.imageSmoothingEnabled=cam.z<1.6;
+  // 底图现在是带地形起伏的连续图像，放大时也必须做双线性插值：
+  // 原来 z>1.6 用最近邻，地形会碎成一块块的方格纸
+  ctx.imageSmoothingEnabled=true;
   ctx.drawImage(provCv,0,0);
   if(cedeMap.on||grantMap.on){ if(cedeDirty){ cctx.putImageData(cedeData,0,0); cedeDirty=false; } ctx.drawImage(cedeCv,0,0); }
   if(selectedProv>0) ctx.drawImage(selCv,0,0);
+  // 城镇层是设备像素尺寸的画布，必须用单位变换 1:1 贴上去（同标签层）
+  ensureTownLayer();
+  if(_townHasContent){ ctx.setTransform(1,0,0,1,0,0); ctx.drawImage(townCv,0,0); }
   ctx.setTransform(dpr,0,0,dpr,0,0);
   _msBlit=_msBlit*0.85+(performance.now()-_t)*0.15; _t=performance.now();
   // 纬线（细微）
@@ -702,6 +906,94 @@ function drawLabels(){
     }
   }
   lctx.textAlign='left';
+}
+
+/* ---------- 城镇层 ----------
+   每个省在「离质心最近的本省陆地像素」上放一个聚落标记，大小按开发度分四级，
+   国都再额外顶一颗金星。位置只跟地形有关，算一次就缓存进 p._tpx。
+   图层和标签层一样按相机指纹缓存：平移/缩放时才重画一次，静止帧零开销；
+   所有同类标记合成一条路径批量描边+填充，几百个城镇也只有几次 canvas 调用。 */
+const townCv=document.createElement('canvas');
+const tctx=townCv.getContext('2d');
+const TOWN_R=[1.7,2.3,3.0,3.9];        // 村镇 / 城镇 / 城市 / 大城
+const TOWN_Z_CITY=2.2;                 // 到这个缩放才显示城市及以上（含国都）
+const TOWN_Z_ALL=4.8;                  // 到这个缩放才显示所有村镇
+
+function ensureTownTable(){
+  if(_townWorld===provinces) return;
+  _townWorld=provinces; _townCount=0;
+  for(let i=1;i<provinces.length;i++){
+    const p=provinces[i];
+    if(!p||!p.pix||!p.pix.length){ if(p) p._tpx=-1; continue; }
+    // 质心可能落在海湾或境外，取离质心最近的本省像素更稳妥
+    let best=-1, bd=Infinity;
+    for(const px of p.pix){
+      const r=(px/COLS)|0, c=px%COLS;
+      const dx=c+0.5-p.cx, dy=r+0.5-p.cy, d=dx*dx+dy*dy;
+      if(d<bd){ bd=d; best=px; }
+    }
+    p._tpx=best; if(best>=0) _townCount++;
+  }
+}
+function star5(g,x,y,ro,ri){
+  for(let i=0;i<10;i++){
+    const a=-Math.PI/2+i*Math.PI/5, rr=(i&1)?ri:ro;
+    const px=x+Math.cos(a)*rr, py=y+Math.sin(a)*rr;
+    if(i===0) g.moveTo(px,py); else g.lineTo(px,py);
+  }
+  g.closePath();
+}
+function drawTowns(){
+  const z=cam.z, rural=z>=TOWN_Z_ALL;
+  const [wx0,wy0]=s2w(-20,-20), [wx1,wy1]=s2w(cw+20,ch+20);
+  const buckets=[[],[],[],[]], caps=[];
+  let n=0;
+  for(let i=1;i<provinces.length;i++){
+    const p=provinces[i];
+    if(!p||!(p._tpx>=0)) continue;
+    const r=(p._tpx/COLS)|0, c=p._tpx%COLS;
+    const wx=c+0.5, wy=r+0.5;
+    if(wx<wx0||wx>wx1||wy<wy0||wy>wy1) continue;
+    const own=countries[p.owner]||countries[p.controller];
+    const isCap=!!(own&&own.alive&&own.capital===p.id);
+    const dev=(p.tax||0)+(p.prod||0)+(p.man||0);
+    let tier=dev>=10?3:dev>=8?2:dev>=6?1:0;
+    if(isCap&&tier<2) tier=2;
+    if(!rural&&!isCap&&tier<2) continue;
+    const [sx,sy]=w2s(wx,wy);
+    buckets[tier].push(sx,sy); n++;
+    if(isCap) caps.push(sx,sy);
+  }
+  if(!n) return;
+  _townCount=n; _townHasContent=true;
+  tctx.lineJoin='round';
+  // 先描一圈浅色再填深色：不管底下压着什么国色都看得清
+  tctx.beginPath();
+  for(let k=0;k<4;k++){
+    const a=buckets[k], rr=TOWN_R[k];
+    for(let i=0;i<a.length;i+=2){ tctx.moveTo(a[i]+rr,a[i+1]); tctx.arc(a[i],a[i+1],rr,0,6.2832); }
+  }
+  tctx.lineWidth=2.6; tctx.strokeStyle='rgba(247,240,222,0.92)'; tctx.stroke();
+  tctx.fillStyle='#241b12'; tctx.fill();
+  if(caps.length){
+    tctx.beginPath();
+    for(let i=0;i<caps.length;i+=2) star5(tctx,caps[i],caps[i+1]-6.2,3.7,1.6);
+    tctx.lineWidth=1.4; tctx.strokeStyle='rgba(34,24,12,0.95)'; tctx.stroke();
+    tctx.fillStyle='#f2cf6e'; tctx.fill();
+  }
+}
+function ensureTownLayer(){
+  const key=cam.x.toFixed(2)+'|'+cam.y.toFixed(2)+'|'+cam.z.toFixed(4)+'|'+cw+'|'+ch+'|'+dpr+'|'+labelEpoch;
+  if(key===townKey) return;
+  townKey=key; _townCount=0; _townHasContent=false;
+  const w=Math.max(1,Math.floor(cw*dpr)), h=Math.max(1,Math.floor(ch*dpr));
+  if(townCv.width!==w||townCv.height!==h){ townCv.width=w; townCv.height=h; }
+  tctx.setTransform(1,0,0,1,0,0); tctx.clearRect(0,0,w,h);
+  tctx.setTransform(dpr,0,0,dpr,0,0);
+  if(cam.z<TOWN_Z_CITY) return;
+  if(!provinces||provinces.length<2) return;
+  ensureTownTable();
+  drawTowns();
 }
 
 function armyPos(a){
