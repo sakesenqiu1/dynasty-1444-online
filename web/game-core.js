@@ -270,6 +270,47 @@ function buildProvinces(cidMap,feats){
   return np;
 }
 
+/* ---------- 地图接缝 ----------
+   等距圆柱投影总有一条接缝。默认接缝在 180° 经线上，斐济（177°E~178°W）、
+   楚科奇（跨 180°）就会被切成地图最左和最右两半。
+   实测整个世界只有一条完全没有陆地的经线：-168.75°（白令海峡那道缝），
+   距 180° 正好 45 列。把整个栅格横向旋转 45 列，接缝就落到那里，谁也不切。
+   旋转放在省份划分之后：省份编号、归属、邻接、名字、发展度全都不变，
+   老剧本和老存档照样能用。 */
+const MAP_SHIFT=45;
+function rotateWorld(shift){
+  shift=((shift%COLS)+COLS)%COLS;
+  if(!shift||!provOf) return;
+  // 旧列 c → 新列 (c-shift+COLS)%COLS：保证新地图的第 0 列对着旧地图的第 shift 列
+  const rotArr=(src)=>{
+    const out=src instanceof Uint8Array?new Uint8Array(NPIX):new Int32Array(NPIX);
+    for(let r=0;r<ROWS;r++){
+      const b=r*COLS;
+      for(let c=0;c<COLS;c++) out[b+((c-shift+COLS)%COLS)]=src[b+c];
+    }
+    return out;
+  };
+  land=rotArr(land); provOf=rotArr(provOf);
+  const rotIdx=(idx)=>{
+    const r=(idx/COLS)|0;
+    return r*COLS+((idx%COLS-shift+COLS)%COLS);
+  };
+  for(let i=1;i<provinces.length;i++){
+    const p=provinces[i];
+    if(!p||!p.pix||!p.pix.length) continue;
+    p.pix=p.pix.map(rotIdx);
+    p.coastPix=p.coastPix.map(rotIdx);
+    const bp=new Map();
+    for(const [q,arr] of p.borderPix) bp.set(q,arr.map(rotIdx));
+    p.borderPix=bp;
+    p._bb=null;
+    // 质心要用旋转后的像素重算：原来的质心可能已经跑到接缝另一侧去了
+    let sx=0, sy=0;
+    for(const idx of p.pix){ sx+=idx%COLS+0.5; sy+=((idx/COLS)|0)+0.5; }
+    p.cx=sx/p.pix.length; p.cy=sy/p.pix.length;
+  }
+}
+
 function buildCountries(cidMap,feats){
   const nFeats=cidMap.size;
   countries=[null];
@@ -604,6 +645,12 @@ function _navArrays(){
   }
 }
 // 海路 BFS：从 fromPid 海岸像素到 toPid 海岸像素，仅走海洋像素
+/* 海面是环绕的：等距圆柱投影的左右两列在世界里其实是挨着的
+   （地图接缝只是画出来的边界，见 rotateWorld）。
+   所以海路 BFS 必须横向回绕，否则接缝会凭空断掉一条航线。 */
+const _wrapL=(c)=>c>0?c-1:COLS-1;
+const _wrapR=(c)=>c+1<COLS?c+1:0;
+
 function findNavalPath(fromPid,toPid){
   if(fromPid===toPid) return [];
   const from=provinces[fromPid], to=provinces[toPid];
@@ -634,8 +681,8 @@ function findNavalPath(fromPid,toPid){
       const u=q[i], r=(u/COLS)|0, c=u%COLS;
       for(let k=0;k<4;k++){
         let v;
-        if(k===0){ if(c===0) continue; v=u-1; }
-        else if(k===1){ if(c+1>=COLS) continue; v=u+1; }
+        if(k===0){ v=r*COLS+_wrapL(c); }
+        else if(k===1){ v=r*COLS+_wrapR(c); }
         else if(k===2){ if(r===0) continue; v=u-COLS; }
         else { if(r+1>=ROWS) continue; v=u+COLS; }
         const t=tag[v];
@@ -653,11 +700,12 @@ function findNavalPath(fromPid,toPid){
     return false;
   };
   let found=false;
-  /* 搜索上限：目标不可达时（例如目标海岸只连着内陆湖）双向 BFS 会把两边的
-     连通海域都搜完，单次能卡住上百毫秒。地图总共 1440×720，
-     现实航路最多几百像素，15 万次访问远远够用；超了就当作不可达。 */
+  /* 搜索上限：海面横向回绕之后全世界的海连成了一整片，
+     跨洋航线（比如大西洋→太平洋）单向要探索几十万像素。
+     上限设成比整幅地图还大，等于让它自然搜完；真的不可达
+     （目标在内陆海/湖里）时只会搜完那个小水域，很快就结束。 */
   let visited=0;
-  const VISIT_CAP=150000;
+  const VISIT_CAP=NPIX+1000;
   while(qF.length&&qB.length){
     if(visited>VISIT_CAP) break;
     if(qF.length<=qB.length){ visited+=qF.length; if(expand(qF,tF,tB)){ found=true; break; } }
@@ -1682,8 +1730,8 @@ function seaAdjacent(a,b){
       if(du>=LIM) continue;
       const r=(u/COLS)|0, c=u%COLS;
       let v, nd=du+1;
-      if(c>0){ v=u-1; if(dist[v]===-1){ if(tset[v]){res=true;} else if(land[v]===0){ dist[v]=nd; if(nd<LIM) q.push(v); } } }
-      if(!res&&c+1<COLS){ v=u+1; if(dist[v]===-1){ if(tset[v]){res=true;} else if(land[v]===0){ dist[v]=nd; if(nd<LIM) q.push(v); } } }
+      { v=r*COLS+_wrapL(c); if(dist[v]===-1){ if(tset[v]){res=true;} else if(land[v]===0){ dist[v]=nd; if(nd<LIM) q.push(v); } } }
+      if(!res){ v=r*COLS+_wrapR(c); if(dist[v]===-1){ if(tset[v]){res=true;} else if(land[v]===0){ dist[v]=nd; if(nd<LIM) q.push(v); } } }
       if(!res&&r>0){ v=u-COLS; if(dist[v]===-1){ if(tset[v]){res=true;} else if(land[v]===0){ dist[v]=nd; if(nd<LIM) q.push(v); } } }
       if(!res&&r+1<ROWS){ v=u+COLS; if(dist[v]===-1){ if(tset[v]){res=true;} else if(land[v]===0){ dist[v]=nd; if(nd<LIM) q.push(v); } } }
     }
@@ -2053,6 +2101,7 @@ function buildWorld(){
   const feats=decodeTopo(WORLD_DATA);
   const {cidMap}=buildLand(feats);
   buildProvinces(cidMap,feats);
+  rotateWorld(MAP_SHIFT);
   buildCountries(cidMap,feats);
   ensureAllCountryFields();
   return {cidMap,feats};
@@ -2164,6 +2213,7 @@ if(typeof module!=='undefined'&&module.exports){
     makeSaveData,applySaveData,pushLog,pushLogTo,pushLogWorld,fmtDate,
     ensureCountryFields,ensureAllCountryFields,COUNTRY_NUM_FIELDS,
     decodeTopo,buildLand,buildProvinces,buildCountries,rebuildLabels,recomputeCap,totalDev,devOf,
+    rotateWorld,MAP_SHIFT,
     tickDay,advanceDay,mergeArmies,resolveBattles,resolveSieges,monthlyTick,economy,aiMonthly,
     declareWar,makePeace,transferProvince,checkDeath,vassalize,releaseStaleOccupations,
     warScore,peaceCost,releaseCost,canDemandProvince,occRatio,atWar,inWar,truceBetween,truceKey,

@@ -161,8 +161,9 @@ try {
 }
 log('世界构建完成');
 
-/* 把镜头挪到指定位并强制重画一帧（LOD 换档也在这时发生） */
-const VIEW = `window.__view=(z,x,y)=>{ cam.z=z; cam.x=x; cam.y=y; _frameKey=''; render(performance.now()); return lodTier; };`;
+/* 把镜头挪到指定位并强制重画一帧（LOD 换档也在这时发生）。
+   坐标写的是「旋转前」的列号，由 __view 统一减去 MAP_SHIFT 的地图接缝偏移。 */
+const VIEW = `window.__view=(z,x,y)=>{ cam.z=z; cam.x=x-MAP_SHIFT; cam.y=y; _frameKey=''; render(performance.now()); return lodTier; };`;
 
 /* ---- 地形层 ---- */
 const terr = await p.eval(`
@@ -207,44 +208,74 @@ check('回到小比例尺会退回 0 档', lod.back === 0, lod.back);
 check('阈值附近有迟滞，不会来回抖', lod.hysterUp === 1 && lod.hysterBack === 1,
   lod.hysterUp + '/' + lod.hysterBack);
 
-/* ---- 省界的显示 / 隐藏 ---- */
+/* ---- 省界的显示 / 隐藏（边界在独立的 bordCv 层，用 alpha 判断） ---- */
 const bord = await p.eval(`
   ${VIEW}
-  // 找一个「同国相邻」的省界：界像素 vs 省内非界像素的亮度比
   let pid=-1, qid=-1;
   for(let i=1;i<provinces.length&&pid<0;i++){
     const p=provinces[i]; if(!p||!p.pix.length) continue;
     for(const [q,arr] of p.borderPix){
       const qp=provinces[q];
-      if(qp&&qp.controller===p.controller&&arr.length>=6){ pid=i; qid=q; break; }
+      // 省界只画 id 小的一侧，所以取样也要挑 p.id<q 的那一半
+      if(qp&&qp.controller===p.controller&&arr.length>=6&&p.id<q){ pid=i; qid=q; break; }
     }
   }
   if(pid<0) return null;
   const p=provinces[pid];
-  const bp=new Set();
-  for(const [,arr] of p.borderPix) for(const x of arr) bp.add(x);
-  const lum=(idx)=>{ const o=idx*4,d=imgData.data; return d[o]*0.3+d[o+1]*0.59+d[o+2]*0.11; };
-  const measure=()=>{
-    const arr=p.borderPix.get(qid);
-    let bl=0; for(const x of arr) bl+=lum(x); bl/=arr.length;
-    let il=0,n=0; for(const x of p.pix){ if(bp.has(x)) continue; il+=lum(x); n++; }
-    il/=Math.max(1,n);
-    return { border:Math.round(bl*10)/10, inner:Math.round(il*10)/10, ratio:Math.round(bl/il*1000)/1000 };
-  };
-  __view(0.9,720,320);
-  const small=measure();
-  __view(2.4,742,196);
-  const medium=measure();
-  __view(6.0,748,190);
-  const large=measure();
-  return { small, medium, large, prov:p.id, provName:p.name };
+  const provArr=p.borderPix.get(qid);
+  // 单独找一个「控制权不同」的边界做对照（开局时=跨国边界）
+  let ctryArr=null;
+  for(let i=1;i<provinces.length&&!ctryArr;i++){
+    const q=provinces[i]; if(!q||!q.pix.length) continue;
+    for(const [o,a] of q.borderPix){
+      const op=provinces[o];
+      if(op&&op.controller!==q.controller&&a.length>=6){ ctryArr=a; break; }
+    }
+  }
+  const meanA=(a)=>{ let s=0; for(const x of a) s+=bordData.data[x*4+3]; return Math.round(s/a.length); };
+  const measure=()=>{ bordDirty=true; _frameKey=''; render(performance.now());
+    return { prov:meanA(provArr), ctry:ctryArr?meanA(ctryArr):null }; };
+  __view(0.9,720,320);  const small=measure();
+  __view(2.4,742,196);  const medium=measure();
+  __view(6.0,748,190);  const large=measure();
+  return { small, medium, large, prov:p.id, provName:p.name,
+           tiny:(()=>{ let n=0; for(let i=1;i<provinces.length;i++){ const q=provinces[i]; if(q&&q.pix.length&&q.pix.length<TINY_PIX) n++; } return n; })(),
+           tinyPix:TINY_PIX };
 `);
-log(`省界亮度比：小 ${bord.small.ratio} / 中 ${bord.medium.ratio} / 大 ${bord.large.ratio}`);
-check('小比例尺不画省界（界像素≈省内底色）', bord && bord.small.ratio > 0.94,
-  bord && (bord.small.ratio + ' (' + bord.small.border + ' vs ' + bord.small.inner + ')'));
-check('中比例尺画出省界（明显比小比例尺暗）', bord && bord.medium.ratio < bord.small.ratio - 0.05,
-  bord && bord.medium.ratio);
-check('大比例尺仍有省界', bord && bord.large.ratio < bord.small.ratio - 0.05, bord && bord.large.ratio);
+log(`边界层不透明度：省界 小 ${bord.small.prov} / 中 ${bord.medium.prov} / 大 ${bord.large.prov}` +
+    `，国界 小 ${bord.small.ctry} / 中 ${bord.medium.ctry} / 大 ${bord.large.ctry}`);
+check('小比例尺不画省界（边界层该处完全透明）', bord && bord.small.prov === 0, bord && bord.small.prov);
+check('中比例尺画出省界', bord && bord.medium.prov > 60, bord && bord.medium.prov);
+check('大比例尺仍有省界', bord && bord.large.prov > 60, bord && bord.large.prov);
+check('国界在任何比例尺都画（而且比省界实）',
+  bord && bord.medium.ctry > bord.medium.prov && bord.small.ctry > 200,
+  bord && (bord.small.ctry + '/' + bord.medium.ctry));
+
+/* ---- 碎地块在小/中比例尺并入海面 ---- */
+const tiny = await p.eval(`
+  ${VIEW}
+  let pid=-1;
+  for(let i=1;i<provinces.length;i++){ const p=provinces[i]; if(p&&p.pix.length&&p.pix.length<TINY_PIX){ pid=i; break; } }
+  if(pid<0) return null;
+  const p=provinces[pid];
+  const px=(idx)=>{ const o=idx*4,d=imgData.data; return d[o]+','+d[o+1]+','+d[o+2]; };
+  // 同一个像素旁边那片海：丢岛之后颜色必须和它一模一样，才看不出这里原本有个岛
+  const sample=()=>{
+    const idx=p.pix[0], r=(idx/COLS)|0, c=idx%COLS;
+    const cand=[c>0?idx-1:-1, c+1<COLS?idx+1:-1, r>0?idx-COLS:-1, r+1<ROWS?idx+COLS:-1];
+    let seaIdx=-1;
+    for(const j of cand) if(j>=0&&!provOf[j]&&seaCol&&seaCol[j]){ seaIdx=j; break; }
+    return { got:px(idx), sea: seaIdx>=0?px(seaIdx):'(无海邻居)' };
+  };
+  __view(0.9,720,320);  const small=sample();
+  __view(2.4,742,196);  const medium=sample();
+  __view(6.0,748,190);  const big=sample();
+  return { pid, n:p.pix.length, small, medium, big };
+`);
+check(`碎地块有 ${bord.tiny} 个（<${bord.tinyPix}px）`, bord.tiny > 10, bord.tiny);
+check('小比例尺下碎地块并入海面（与旁边海水颜色一致）', tiny.small.got === tiny.small.sea, tiny.small);
+check('中比例尺下碎地块并入海面（与旁边海水颜色一致）', tiny.medium.got === tiny.medium.sea, tiny.medium);
+check('大比例尺下碎地块照常画出来', tiny.big.got !== tiny.big.sea, tiny.big);
 
 /* ---- 海域分带 + 陆地投影 ---- */
 const sea = await p.eval(`
@@ -384,13 +415,14 @@ check('底图合成开销可忽略 (<8ms)', frame.every(f => f.blit < 8), frame.
 const capView = await p.eval("return {x:cam.x, y:cam.y};");
 const shots = [
   ['1-world-small', "cam.z=0.88; cam.x=720; cam.y=310; mapMode='political';"],
-  ['2-europe-mid', "cam.z=2.4; cam.x=742; cam.y=196;"],
-  ['3-eastasia-mid', "cam.z=2.4; cam.x=1082; cam.y=182;"],
-  ['4-close-big', "cam.z=6.2; cam.x=748; cam.y=190;"],
-  ['5-zoomcity', "cam.z=11; cam.x=744; cam.y=192;"],
+  ['2-europe-mid', "cam.z=2.4; cam.x=742-MAP_SHIFT; cam.y=196;"],
+  ['3-eastasia-mid', "cam.z=2.4; cam.x=1082-MAP_SHIFT; cam.y=182;"],
+  ['4-close-big', "cam.z=6.2; cam.x=748-MAP_SHIFT; cam.y=190;"],
+  ['5-zoomcity', "cam.z=11; cam.x=744-MAP_SHIFT; cam.y=192;"],
   ['7-capital', `cam.z=7.5; cam.x=${capView.x}; cam.y=${capView.y};`],
-  ['8-mountains', "cam.z=5.0; cam.x=1055; cam.y=250;"],
-  ['9-andes', "cam.z=4.0; cam.x=430; cam.y=470;"],
+  ['8-mountains', "cam.z=5.0; cam.x=1055-MAP_SHIFT; cam.y=250;"],
+  ['9-andes', "cam.z=4.0; cam.x=430-MAP_SHIFT; cam.y=470;"],
+  ['11-seam', "cam.z=1.9; cam.x=8; cam.y=120;"],   // 白令海峡：接缝两侧
 ];
 await p.eval("document.getElementById('lobby').classList.add('hidden'); return true;");
 for (const [name, code] of shots) {
@@ -409,7 +441,7 @@ for (const [name, code] of shots) {
 await p.eval(`
   document.getElementById('sidepanel').style.display='';
   document.getElementById('modebar').style.display='';
-  cam.z=2.4; cam.x=742; cam.y=196; _frameKey=''; render(performance.now()); return true;
+  cam.z=2.4; cam.x=742-MAP_SHIFT; cam.y=196; _frameKey=''; render(performance.now()); return true;
 `);
 await sleep(450);
 log('截图 ' + await p.shot('6-withui'));

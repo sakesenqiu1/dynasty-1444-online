@@ -176,14 +176,16 @@ function buildTerrTab(bm,ad,sh){
   return t;
 }
 const TERR_TAB     =buildTerrTab(1.00,1.00,1.00);   // 中/大比例尺：全量地形
-const TERR_TAB_FLAT=buildTerrTab(0.70,0.70,0.40);   // 小比例尺：政治版图为主
+const TERR_TAB_FLAT=buildTerrTab(0.92,0.90,0.62);   // 小比例尺：地形照样看得见，只是浅一点
 const COAST_SAND=[214,198,158];
+const TINY_PIX=14;                  // 小于这个像素数的地块算碎块（小/中比例尺当海面）
 
 /* 高程/生态两级分辨率：
    Lo 用「带掩膜的盒式模糊」把高程压粗，中比例尺看到的是成片的山区而不是一条条细纹；
    Hi 保留全部细节，放大后才用。两者共用同一张调色表。 */
 let terrHi=null, terrLo=null;
 let terrArr=null, terrTab=null;
+let seaCol=null;                 // Uint32Array(NPIX)：海面颜色备份（丢碎地块时用）
 
 /* 小比例尺 → 中 → 大：边界与地形细节逐级放出来。
    两级阈值各自带迟滞（进入 +h、退出 -h），既不会在阈值上抖，
@@ -332,10 +334,13 @@ const BLOBS=[
   [ 0.42,5,3,-62,5],        // 圭亚那高原
 ];
 
-/* 把上面的骨架栅格化到世界栅格（分辨率相同，之后直接查表） */
+/* 把上面的骨架栅格化到世界栅格（分辨率相同，之后直接查表）。
+   经纬度要先按 MAP_SHIFT 旋到显示列上，否则山脉会和真实海岸线错开 11°。 */
 function buildElevMacro(){
   const g=new Float32Array(NPIX);
   const smooth=(u)=>u*u*(3-2*u);
+  const SH=MAP_SHIFT;
+  const wrapC=(c)=>{ c%=COLS; return c<0?c+COLS:c; };
   for(const [h,wDeg,pts] of RANGES){
     const wpx=wDeg/0.25;
     for(let k=0;k+3<pts.length;k+=2){
@@ -350,7 +355,7 @@ function buildElevMacro(){
           const d=Math.hypot(c-x,r-y)/wpx;
           if(d>=1) continue;
           const v=h*smooth(1-d);              // 山脊在中心线最高，向两侧平滑落下
-          const i=r*COLS+c;
+          const i=r*COLS+wrapC(c-SH);
           if(v>g[i]) g[i]=v;
         }
       }
@@ -364,7 +369,7 @@ function buildElevMacro(){
       const d=Math.hypot((c-cx)/rx2,(r-cy)/ry2);
       if(d>=1) continue;
       const v=h*(1-d*d);
-      const i=r*COLS+c;
+      const i=r*COLS+wrapC(c-SH);
       if(h>=0){ if(v>g[i]) g[i]=v; }
       else if(g[i]<=0&&v<g[i]) g[i]=v;      // 盆地只往下压，不覆盖山脊
     }
@@ -443,9 +448,10 @@ function ensureTerrain(){
       moistA[idx]=m;
     }
   }
-  // 2) 粗高程 / 湿度（中比例尺用）
-  const elevLo=blurLand(elevA,3,2);
-  const moistLo=blurLand(moistA,2,1);
+  // 2) 粗高程 / 湿度（中比例尺用）：只做很轻的模糊，
+  //    重了山区就平掉了 —— 中比例尺要的是「成片」而不是「没有」
+  const elevLo=blurLand(elevA,2,1);
+  const moistLo=blurLand(moistA,1,1);
   // 3) 两级着色索引
   terrHi=new Uint16Array(NPIX);
   terrLo=new Uint16Array(NPIX);
@@ -458,7 +464,7 @@ function ensureTerrain(){
       const eH=elevA[idx];
       // 高处对比更强：山地跳出来，平原保持安静
       const shH=hillshade(elevA,idx,c,r,1,5.2,2.05*(0.86+0.72*eH));
-      const shL=hillshade(elevLo,idx,c,r,3,11.0,2.05);
+      const shL=hillshade(elevLo,idx,c,r,2,7.0,1.85);
       terrHi[idx]=biomeOf(eH,moistA[idx],wl,coast[idx])*TERR_SHADES+shH;
       terrLo[idx]=biomeOf(elevLo[idx],moistLo[idx],wl,coast[idx])*TERR_SHADES+shL;
       sSum+=shH; sSq+=shH*shH; sSum2+=shL; sSq2+=shL*shL; sN++;
@@ -468,7 +474,9 @@ function ensureTerrain(){
   _shadeSd=sN?Math.sqrt(Math.max(0,sSq/sN-_shadeMean*_shadeMean)):0;
   _shadeSdLo=sN?Math.sqrt(Math.max(0,sSq2/sN-(sSum2/sN)*(sSum2/sN))):0;
   // 4) 海面：水深分带 + 纬度明暗 + 陆地投在东南侧的影子（立体感的另一半）
+  //    顺便把海色存一份，小比例尺丢弃碎地块时要拿它来填
   const sd=buildSeaDepth();
+  seaCol=new Uint32Array(NPIX);
   const d=imgData.data;
   for(let r=0;r<ROWS;r++){
     const wl=Math.abs(90-(r+0.5)*0.25)/90, kk=1-0.12*wl*wl;
@@ -479,8 +487,10 @@ function ensureTerrain(){
       let k2=1;
       if((c>0&&provOf[i-1])||(r>0&&provOf[i-COLS])||(c>0&&r>0&&provOf[i-COLS-1])) k2-=0.17;
       if((c+1<COLS&&provOf[i+1])||(r+1<ROWS&&provOf[i+COLS])||(c+1<COLS&&r+1<ROWS&&provOf[i+COLS+1])) k2+=0.11;
+      const rr=(col[0]*kk*k2)|0, gg=(col[1]*kk*k2)|0, bb=(col[2]*kk*k2)|0;
+      seaCol[i]=(rr|(gg<<8)|(bb<<16)|(255<<24))>>>0;
       const o=i*4;
-      d[o]=col[0]*kk*k2; d[o+1]=col[1]*kk*k2; d[o+2]=col[2]*kk*k2; d[o+3]=255;
+      d[o]=rr; d[o+1]=gg; d[o+2]=bb; d[o+3]=255;
     }
   }
   _terrMs=performance.now()-t0;
@@ -733,6 +743,54 @@ function setPxT(idx,r,g,b){
   const k=t[idx]*6, m=terrTab, o=idx*4, d=imgData.data;
   d[o]=r*m[k]+m[k+3]; d[o+1]=g*m[k+1]+m[k+4]; d[o+2]=b*m[k+2]+m[k+5]; d[o+3]=255;
 }
+/* 小比例尺下把碎地块当海面：太平洋环礁、爱琴海小岛这种一两个像素的地块
+   画出来只会让地图变成一片麻点。
+   颜色直接借旁边那片海 —— 这样填完之后完全看不出这里原本有个岛。 */
+function seaColorNear(idx){
+  const r=(idx/COLS)|0, c=idx%COLS;
+  const cand=[c>0?idx-1:-1, c+1<COLS?idx+1:-1, r>0?idx-COLS:-1, r+1<ROWS?idx+COLS:-1];
+  for(const j of cand) if(j>=0&&!provOf[j]&&seaCol&&seaCol[j]) return seaCol[j];
+  const kk=1-0.12*Math.pow(Math.abs(90-(r+0.5)*0.25)/90,2);
+  const b=SEA_BANDS[0];
+  return (((b[0]*kk*0.9)|0)|(((b[1]*kk*0.9)|0)<<8)|(((b[2]*kk*0.9)|0)<<16)|(255<<24))>>>0;
+}
+function setPxSea(idx,color){
+  const v=color||seaColorNear(idx), d=imgData.data, o=idx*4;
+  d[o]=v&255; d[o+1]=(v>>>8)&255; d[o+2]=(v>>>16)&255; d[o+3]=255;
+}
+
+/* ---------- 省界 / 国界覆盖层 ----------
+   底图要平滑（双线性插值，地形才有渐变），边界要锐利（最近邻，放大后是一条硬边），
+   两者挤在同一张位图上必然互相将就：原来把边界画进底图，放大就一起被插值糊掉了。
+   现在边界单独一层：透明底 + 边界像素，贴图时按最近邻，缩放不会把它糊开。 */
+const bordCv=document.createElement('canvas'); bordCv.width=COLS; bordCv.height=ROWS;
+const bctx=bordCv.getContext('2d');
+let bordData=bctx.createImageData(COLS,ROWS);
+let bordDirty=true;
+const BORD_CTRY=[24,20,14,240];      // 国界：近黑，压得住
+const BORD_PROV=[22,16,8,130];       // 省界：半透明深色，看得清但不抢地形
+function repaintBorders(){
+  const d=bordData.data;
+  d.fill(0);
+  const showProv=lodTier>=1;
+  const tiny2=lodTier>=2;            // 大比例尺才把碎地块画出来
+  for(let i=1;i<provinces.length;i++){
+    const p=provinces[i];
+    if(!p||!p.pix.length||!p.borderPix.size) continue;
+    if(!tiny2&&p.pix.length<TINY_PIX) continue;
+    for(const [q,arr] of p.borderPix){
+      const qp=provinces[q];
+      const strong=!qp||qp.controller!==p.controller;
+      if(!strong&&!showProv) continue;
+      // 省界只画一侧 → 一条 1px 细线；国界两侧都画 → 2px，和省的界一眼分得开
+      if(!strong&&p.id>q) continue;
+      const c=strong?BORD_CTRY:BORD_PROV;
+      for(const idx of arr){ const o=idx*4; d[o]=c[0]; d[o+1]=c[1]; d[o+2]=c[2]; d[o+3]=c[3]; }
+    }
+  }
+  bctx.putImageData(bordData,0,0);
+  bordDirty=false;
+}
 
 /* ---------- 脏矩形 ----------
    原来只要有一个省变色，渲染时就把整幅 1440×720（约 4MB）重新 putImageData，
@@ -759,6 +817,14 @@ function expandBox(bb){
 function recolorProvince(pid){
   const p=provinces[pid]; if(!p||!p.pix.length) return;
   expandBox(provBB(p));
+  bordDirty=true;
+  // 小/中比例尺下，特别小的地块直接当海面，免得地图上一片麻点
+  if(lodTier<2&&p.pix.length<TINY_PIX){
+    for(const idx of p.pix) setPxSea(idx);
+    for(const idx of p.coastPix) setPxSea(idx);
+    imgDirty=true;
+    return;
+  }
   const f=provFill(p);
   const occupied=p.controller!==p.owner&&countries[p.controller];
   const oc=occupied?countries[p.controller]:null;
@@ -778,18 +844,7 @@ function recolorProvince(pid){
     if(occupied){ const r=Math.floor(idx/COLS), c=idx%COLS; if((r+c)%6>=3) u=of; }
     setPx(idx,u[0]*0.55+cs[0]*0.45,u[1]*0.55+cs[1]*0.45,u[2]*0.55+cs[2]*0.45);
   }
-  // 小比例尺只看国家版图：省界整条不画，只留控制权不同的国界线
-  const showProv=lodTier>=1;
-  for(const [q,arr] of p.borderPix){
-    const qp=provinces[q];
-    const strong=qp&&qp.controller!==p.controller;
-    if(!strong&&!showProv) continue;
-    for(const idx of arr){
-      // 控制权不同 → 一条压深的国界线；同国省界只是浅浅一道
-      if(strong) setPxT(idx,f[0]*0.30,f[1]*0.30,f[2]*0.30);
-      else setPxT(idx,f[0]*0.8,f[1]*0.8,f[2]*0.8);
-    }
-  }
+  // 国界 / 省界交给 bordCv 那一层去画（那里用最近邻贴图，放大后不会被插值糊掉）
   imgDirty=true;
 }
 function recolorProvAndNbrs(pid){
@@ -800,6 +855,7 @@ function recolorProvAndNbrs(pid){
 function recolorAll(){
   ensureTerrain();
   terrUseTier(lodTier);
+  bordDirty=true;
   for(let i=1;i<provinces.length;i++) recolorProvince(i);
   imgDirty=true; imgBox=null;
 }
@@ -1012,8 +1068,8 @@ function recruitSig(){
 }
 function needsRender(t){
   const k = cam.x.toFixed(3)+'|'+cam.y.toFixed(3)+'|'+cam.z.toFixed(4)+'|'+cw+'|'+ch+'|'+dpr+'|'+
-    labelEpoch+'|'+selectedProv+'|'+selectedArmy+'|'+mapMode+'|'+_armyVer+'|'+recruitSig()+'|'+
-    ((imgDirty?1:0)|(selDirty?2:0)|(cedeMap.on?(cedeDirty?4:0):(grantMap.on?(cedeDirty?4:0):8)));
+    labelEpoch+'|'+selectedProv+'|'+selectedArmy+'|'+mapMode+'|'+_armyVer+'|'+recruitSig()+'|'+lodTier+'|'+
+    ((imgDirty?1:0)|(selDirty?2:0)|(bordDirty?8:0)|(cedeMap.on?(cedeDirty?4:0):(grantMap.on?(cedeDirty?4:0):16)));
   if(k!==_frameKey){ _frameKey=k; return true; }
   // 兜底：浏览器在后台可能丢弃画布内容，最多 3 秒强制重画一次
   if(t-_lastRealRender>3000){ _lastRealRender=t; return true; }
@@ -1055,13 +1111,22 @@ function render(t){
     imgDirty=false; imgBox=null;
   }
   if(selDirty){ sctx.putImageData(selData,0,0); selDirty=false; }
+  if(bordDirty) repaintBorders();
   _msPut=_msPut*0.85+(performance.now()-_t)*0.15; _t=performance.now();
   const tx=(cw/2-cam.x*cam.z)*dpr, ty=(ch/2-cam.y*cam.z)*dpr;
   ctx.setTransform(cam.z*dpr,0,0,cam.z*dpr,tx,ty);
-  // 底图现在是带地形起伏的连续图像，放大时也必须做双线性插值：
-  // 原来 z>1.6 用最近邻，地形会碎成一块块的方格纸
+  // 只贴视野内那一块：放得很大时整幅贴图在软件渲染下要几毫秒
+  const [vwx0,vwy0]=s2w(0,0), [vwx1,vwy1]=s2w(cw,ch);
+  const bx=clamp(Math.floor(vwx0)-1,0,COLS), by=clamp(Math.floor(vwy0)-1,0,ROWS);
+  const bw=clamp(Math.ceil(vwx1)+1,0,COLS)-bx, bh=clamp(Math.ceil(vwy1)+1,0,ROWS)-by;
+  const sub=(cv)=>{ if(bw>0&&bh>0&&(bw<COLS||bh<ROWS)) ctx.drawImage(cv,bx,by,bw,bh,bx,by,bw,bh); else ctx.drawImage(cv,0,0); };
+  // 底图用双线性：地形是连续起伏，放大后也要平滑
   ctx.imageSmoothingEnabled=true;
-  ctx.drawImage(provCv,0,0);
+  sub(provCv);
+  // 边界层用最近邻：放大后是一条硬边，不会被插值糊成一团
+  ctx.imageSmoothingEnabled=cam.z<1.5;
+  sub(bordCv);
+  ctx.imageSmoothingEnabled=true;
   if(cedeMap.on||grantMap.on){ if(cedeDirty){ cctx.putImageData(cedeData,0,0); cedeDirty=false; } ctx.drawImage(cedeCv,0,0); }
   if(selectedProv>0) ctx.drawImage(selCv,0,0);
   // 城镇层是设备像素尺寸的画布，必须用单位变换 1:1 贴上去（同标签层）
