@@ -130,42 +130,81 @@ function fbmN(x,y,oct,s,ridge){
 }
 
 /* 每类地形一组调色：[R,G,B 乘数, R,G,B 加数]
-   乘数管明暗冷暖，加数管沙/雪/植被染色；四级坡向再乘一次明暗 */
+   乘数管明暗冷暖，加数管沙/雪/植被染色；坡向再乘一次连续的明暗系数 */
 const TERR_BIOME=[
   [1.00,1.00,1.00,  0, 0, 0],   // 0 不调制（海面 / 未定）
-  [1.03,1.02,0.93,  5, 6, 0],   // 1 平原
-  [1.08,1.03,0.87, 13,10, 0],   // 2 草原
-  [0.89,1.00,0.85,  0,10, 0],   // 3 森林
-  [0.80,0.98,0.77,  0,17, 3],   // 4 雨林
-  [1.13,1.06,0.81, 28,21, 4],   // 5 沙漠
-  [0.96,0.94,0.88,  5, 4, 2],   // 6 丘陵
-  [0.82,0.81,0.78, 10, 9, 8],   // 7 山地
-  [0.74,0.77,0.83, 50,52,56],   // 8 雪峰
-  [0.86,0.97,0.91,  0, 8,10],   // 9 针叶林
-  [0.97,0.99,1.03, 17,19,22],   // 10 苔原
-  [0.87,0.95,0.87,  0,10, 6],   // 11 沼泽
-  [1.07,1.00,0.84, 15,11, 0],   // 12 稀树草原
+  [1.02,1.03,0.92,  6, 8, 0],   // 1 平原
+  [1.10,1.04,0.84, 16,12, 0],   // 2 草原
+  [0.86,1.01,0.82,  0,14, 0],   // 3 森林
+  [0.74,0.98,0.72,  0,22, 4],   // 4 雨林
+  [1.16,1.07,0.78, 34,25, 5],   // 5 沙漠
+  [0.97,0.93,0.85,  8, 6, 2],   // 6 丘陵
+  [0.86,0.83,0.79, 18,16,14],   // 7 山地
+  [0.78,0.81,0.88, 54,57,62],   // 8 雪峰
+  [0.84,0.98,0.90,  0,10,12],   // 9 针叶林
+  [0.98,1.00,1.05, 22,25,29],   // 10 苔原
+  [0.85,0.95,0.86,  0,12, 8],   // 11 沼泽
+  [1.08,1.00,0.82, 18,13, 0],   // 12 稀树草原
 ];
-const TERR_SHADE=[0.86,0.92,0.98,1.04,1.10,1.16];   // 坡向明暗（西北来光）
-const TERR_TAB=(()=>{
-  const t=new Float32Array(TERR_BIOME.length*TERR_SHADE.length*6);
+const TERR_NAMES=['—','平原','草原','森林','雨林','沙漠','丘陵','山地','雪峰','针叶林','苔原','沼泽','稀树草原'];
+const TERR_SHADES=256;                          // 坡向明暗的档数（连续渐变，不再是 6 级台阶）
+
+/* 坡向明暗曲线：118 ≈ 平地，暗部压得更狠一点，立体感才出得来 */
+function shadeMulF(s){
+  const x=(s-118)/137;
+  return x<0 ? 1+x*0.46 : 1+x*0.30;
+}
+/* 一张调色表 = 生态色 × 坡向明暗。
+   bm/ad/sh 是把地形往「不调制」收缩的系数：
+   小比例尺只看政治版图，地形只留一点点暗示，所以用收缩过的那张表。 */
+function buildTerrTab(bm,ad,sh){
+  const n=TERR_BIOME.length*TERR_SHADES;
+  const t=new Float32Array(n*6);
   for(let b=0;b<TERR_BIOME.length;b++){
     const s=TERR_BIOME[b];
-    for(let k=0;k<TERR_SHADE.length;k++){
-      const o=(b*TERR_SHADE.length+k)*6, m=TERR_SHADE[k];
-      t[o]=s[0]*m; t[o+1]=s[1]*m; t[o+2]=s[2]*m;
-      t[o+3]=s[3]; t[o+4]=s[4]; t[o+5]=s[5];
+    const m0=1+(s[0]-1)*bm, m1=1+(s[1]-1)*bm, m2=1+(s[2]-1)*bm;
+    const a0=s[3]*ad, a1=s[4]*ad, a2=s[5]*ad;
+    for(let k=0;k<TERR_SHADES;k++){
+      const o=(b*TERR_SHADES+k)*6;
+      const sm=shadeMulF(k), f=1+(sm-1)*sh;
+      // 明暗除了乘在国色上，再叠一点加减：深色国土上也能看出起伏
+      const off=(sm-1)*sh*34;
+      t[o]=m0*f; t[o+1]=m1*f; t[o+2]=m2*f;
+      t[o+3]=a0+off; t[o+4]=a1+off; t[o+5]=a2+off;
     }
   }
   return t;
-})();
-const TERR_NAMES=['—','平原','草原','森林','雨林','沙漠','丘陵','山地','雪峰','针叶林','苔原','沼泽','稀树草原'];
-let terrIdx=null;                              // Uint8Array(NPIX)：生态*6+坡向，0=不调制
+}
+const TERR_TAB     =buildTerrTab(1.00,1.00,1.00);   // 中/大比例尺：全量地形
+const TERR_TAB_FLAT=buildTerrTab(0.70,0.70,0.40);   // 小比例尺：政治版图为主
 const COAST_SAND=[214,198,158];
+
+/* 高程/生态两级分辨率：
+   Lo 用「带掩膜的盒式模糊」把高程压粗，中比例尺看到的是成片的山区而不是一条条细纹；
+   Hi 保留全部细节，放大后才用。两者共用同一张调色表。 */
+let terrHi=null, terrLo=null;
+let terrArr=null, terrTab=null;
+
+/* 小比例尺 → 中 → 大：边界与地形细节逐级放出来。
+   两级阈值各自带迟滞（进入 +h、退出 -h），既不会在阈值上抖，
+   也允许一步跨两档（比如直接跳回世界视角）。 */
+const LOD_Z_MID=1.6, LOD_Z_HI=3.4;
+let lodTier=0;
+function lodTierFor(z,prev){
+  const h=0.15;
+  let t=0;
+  if(z>=LOD_Z_MID+(prev>=1?-h:h)) t=1;
+  if(z>=LOD_Z_HI +(prev>=2?-h:h)) t=2;
+  return t;
+}
+function terrUseTier(t){
+  const a=(t>=2)?terrHi:terrLo;
+  if(!a) return;
+  terrArr=a; terrTab=(t===0)?TERR_TAB_FLAT:TERR_TAB;
+}
 
 /* 浅海分带：近岸亮、远洋暗。相邻两档只差一点点，才是一条柔和的近岸渐变
    而不是套在海岸线上的亮蓝圈 */
-const TERR_SHADES=TERR_SHADE.length;
 const SEA_BANDS=[[0x46,0x72,0x9c],[0x3a,0x61,0x88],[0x32,0x52,0x74]];
 const SEA_DEEP=[0x2a,0x42,0x60];
 
@@ -225,44 +264,210 @@ function biomeOf(e,m,wl,cd){
   if(m>0.62) return 3;                          // 森林
   return 1;                                     // 平原
 }
-let _terrMs=0, _terrHist=null;
+/* ---------- 真实地形骨架 ----------
+   世界海岸线来自真实国界数据，但气候噪声本身不知道山在哪，
+   安第斯、喜马拉雅会跑到随机位置去。所以这里手工标注主要山脉与盆地，
+   放在真实经纬度上，噪声只负责在骨架上加细碎质感。 */
+/* [脊高, 半宽(度), [经度,纬度, 经度,纬度, ...]] */
+const RANGES=[
+  [1.00,2.4,[-75,10, -77,0, -78,-10, -70,-20, -69,-30, -71,-40, -73,-50, -72,-54]], // 安第斯
+  [0.90,3.4,[-150,62, -135,58, -125,50, -118,42, -110,35, -106,28, -104,22]],       // 落基山
+  [0.80,1.6,[-123,49, -120,42, -118,36]],                                           // 内华达/喀斯喀特
+  [0.45,2.0,[-84,46, -80,38, -84,33]],                                              // 阿巴拉契亚
+  [0.55,1.5,[-155,68, -145,68]],                                                    // 布鲁克斯
+  [0.70,2.0,[5,58, 8,62, 12,65, 16,68, 22,69, 26,70]],                              // 斯堪的纳维亚
+  [0.55,2.2,[-6,57, -5,56]],                                                        // 苏格兰高地
+  [0.78,1.6,[-9,43, -5,43, 0,42.7, 2,42.4]],                                        // 比利牛斯
+  [0.85,1.6,[6,45, 10,46.5, 14,47, 16,47.5]],                                       // 阿尔卑斯
+  [0.45,3.0,[-7,40, -4,40, 0,40]],                                                  // 伊比利亚高原
+  [0.62,1.4,[19,49.5, 23,47.5, 25,45.5]],                                           // 喀尔巴阡
+  [0.58,1.6,[60,67, 59,60, 58,54, 55,50]],                                          // 乌拉尔
+  [0.85,1.1,[40,43.5, 44,42.5, 48,41]],                                             // 高加索
+  [0.72,2.0,[42,39, 38,39]],                                                        // 亚美尼亚高原
+  [0.80,1.0,[50,36.5, 54,36.5, 58,36]],                                             // 厄尔布尔士
+  [0.85,1.8,[45,37, 50,32, 55,28, 58,26]],                                          // 扎格罗斯
+  [0.60,4.0,[54,33, 60,32, 62,30]],                                                 // 伊朗高原
+  [0.90,1.6,[62,40, 66,39, 70,38]],                                                 // 科佩特/兴都库什西
+  [1.00,2.2,[68,36, 73,36, 77,35.5]],                                               // 喀喇昆仑
+  [1.00,2.4,[75,34, 82,29, 88,28, 95,28.5]],                                        // 喜马拉雅
+  [0.92,5.0,[80,33, 88,33, 96,34]],                                                 // 青藏高原
+  [0.45,5.0,[76,18, 79,18, 78,22]],                                                 // 德干高原
+  [0.82,1.8,[70,42, 78,42, 85,43]],                                                 // 天山
+  [0.70,2.6,[88,50, 95,51, 102,52]],                                                // 阿尔泰/萨彦
+  [0.58,2.6,[118,52, 126,55, 133,57]],                                              // 大兴安岭
+  [0.55,2.8,[128,68, 140,66, 150,64]],                                              // 维尔霍扬斯克
+  [0.60,1.4,[100,26, 102,22]],                                                      // 云贵
+  [0.58,1.1,[104,20, 107,15, 108,11]],                                              // 长山
+  [0.55,1.0,[73,20, 75,15, 77,10]],                                                 // 西高止
+  [0.80,1.3,[158,55, 160,52]],                                                      // 堪察加
+  [0.70,0.9,[137,36, 139,37, 141,40]],                                              // 日本阿尔卑斯
+  [0.70,1.2,[168,-44, 172,-42, 175,-38]],                                           // 南阿尔卑斯
+  [0.62,1.8,[146,-20, 149,-28, 151,-34, 147,-38]],                                  // 大分水岭
+  [0.85,1.6,[137,-4, 141,-5, 146,-6]],                                              // 新几内亚
+  [0.62,1.2,[100,3, 103,-2, 105,-5]],                                               // 巴里散
+  [0.50,0.7,[107,-7, 113,-8]],                                                      // 爪哇
+  [0.50,3.2,[112,1, 115,0, 117,2]],                                                 // 婆罗洲
+  [0.62,1.3,[121,16, 122,10, 125,7]],                                               // 菲律宾
+  [0.80,3.0,[8,23, 10,21, 12,19]],                                                  // 阿哈加尔/提贝斯提
+  [0.82,4.0,[36,9, 39,9, 38,13]],                                                   // 埃塞俄比亚高原
+  [0.78,2.2,[36,15, 36,5, 34,-5, 33,-15]],                                          // 东非大裂谷
+  [0.72,1.7,[29,-25, 28,-31, 25,-34]],                                              // 德拉肯斯
+  [0.80,1.6,[-8,32, -3,33, 3,35]],                                                  // 阿特拉斯
+  [0.58,2.5,[46,-19, 48,-19, 47,-23]],                                              // 马达加斯加
+  [0.62,1.4,[80,7, 81,7]],                                                          // 斯里兰卡
+  [0.55,1.3,[-19,65, -18,64]],                                                      // 冰岛
+  [0.85,0.7,[121,23.7, 121,23]],                                                    // 台湾
+];
+/* [高度(可为负=盆地), 经度半径, 纬度半径, 经度, 纬度] */
+const BLOBS=[
+  [-0.32,10,7,-62,-4],      // 亚马孙盆地
+  [-0.26,7,5,22,0],         // 刚果盆地
+  [-0.30,16,8,75,60],       // 西西伯利亚平原
+  [-0.28,6,3,84,39],        // 塔里木盆地
+  [-0.20,18,7,8,22],        // 撒哈拉
+  [-0.12,7,5,22,-24],       // 喀拉哈里
+  [-0.16,10,8,135,-25],     // 澳洲内陆
+  [-0.14,6,4,-60,-33],      // 潘帕斯
+  [ 0.40,8,7,-45,-18],      // 巴西高原
+  [ 0.42,5,3,-62,5],        // 圭亚那高原
+];
+
+/* 把上面的骨架栅格化到世界栅格（分辨率相同，之后直接查表） */
+function buildElevMacro(){
+  const g=new Float32Array(NPIX);
+  const smooth=(u)=>u*u*(3-2*u);
+  for(const [h,wDeg,pts] of RANGES){
+    const wpx=wDeg/0.25;
+    for(let k=0;k+3<pts.length;k+=2){
+      const x0=(pts[k]+180)/0.25, y0=(90-pts[k+1])/0.25;
+      const x1=(pts[k+2]+180)/0.25, y1=(90-pts[k+3])/0.25;
+      const steps=Math.max(1,Math.ceil(Math.hypot(x1-x0,y1-y0)));
+      for(let s=0;s<=steps;s++){
+        const x=x0+(x1-x0)*s/steps, y=y0+(y1-y0)*s/steps;
+        const c0=Math.max(0,Math.floor(x-wpx)), c1=Math.min(COLS-1,Math.ceil(x+wpx));
+        const r0=Math.max(0,Math.floor(y-wpx)), r1=Math.min(ROWS-1,Math.ceil(y+wpx));
+        for(let r=r0;r<=r1;r++) for(let c=c0;c<=c1;c++){
+          const d=Math.hypot(c-x,r-y)/wpx;
+          if(d>=1) continue;
+          const v=h*smooth(1-d);              // 山脊在中心线最高，向两侧平滑落下
+          const i=r*COLS+c;
+          if(v>g[i]) g[i]=v;
+        }
+      }
+    }
+  }
+  for(const [h,rx,ry,lon,lat] of BLOBS){
+    const cx=(lon+180)/0.25, cy=(90-lat)/0.25, rx2=rx/0.25, ry2=ry/0.25;
+    const c0=Math.max(0,Math.floor(cx-rx2)), c1=Math.min(COLS-1,Math.ceil(cx+rx2));
+    const r0=Math.max(0,Math.floor(cy-ry2)), r1=Math.min(ROWS-1,Math.ceil(cy+ry2));
+    for(let r=r0;r<=r1;r++) for(let c=c0;c<=c1;c++){
+      const d=Math.hypot((c-cx)/rx2,(r-cy)/ry2);
+      if(d>=1) continue;
+      const v=h*(1-d*d);
+      const i=r*COLS+c;
+      if(h>=0){ if(v>g[i]) g[i]=v; }
+      else if(g[i]<=0&&v<g[i]) g[i]=v;      // 盆地只往下压，不覆盖山脊
+    }
+  }
+  return g;
+}
+
+/* 带掩膜的盒式模糊：海面权为 0，不参与平均，海岸线才不会被拉成深色 */
+function blurLand(src,radius,iter){
+  const v=Float32Array.from(src);
+  const w=new Float32Array(NPIX);
+  const tv=new Float32Array(NPIX), tw=new Float32Array(NPIX);
+  for(let i=0;i<NPIX;i++) w[i]=provOf[i]?1:0;
+  for(let it=0;it<iter;it++){
+    for(let r=0;r<ROWS;r++){
+      const b=r*COLS; let sv=0,sw=0;
+      for(let k=-radius;k<=radius;k++){ const j=b+clamp(k,0,COLS-1); sv+=v[j]; sw+=w[j]; }
+      for(let c=0;c<COLS;c++){
+        tv[b+c]=sv; tw[b+c]=sw;
+        const a=b+Math.max(0,c-radius), z=b+Math.min(COLS-1,c+radius+1);
+        sv+=v[z]-v[a]; sw+=w[z]-w[a];
+      }
+    }
+    for(let c=0;c<COLS;c++){
+      let sv=0,sw=0;
+      for(let k=-radius;k<=radius;k++){ const j=clamp(k,0,ROWS-1)*COLS+c; sv+=tv[j]; sw+=tw[j]; }
+      for(let r=0;r<ROWS;r++){
+        const i=r*COLS+c;
+        v[i]=sv; w[i]=sw;
+        const a=Math.max(0,r-radius)*COLS+c, z=Math.min(ROWS-1,r+radius+1)*COLS+c;
+        sv+=tv[z]-tv[a]; sw+=tw[z]-tw[a];
+      }
+    }
+  }
+  for(let i=0;i<NPIX;i++) v[i]=w[i]>0.001?v[i]/w[i]:0;
+  return v;
+}
+/* 真正的坡向光照：由高程梯度求法线，跟西北 45° 的光做点乘。
+   step 是取样步长（粗分辨率用大步长，山体才是成片的），
+   gain 放大对比，vex 是垂直夸张。 */
+function hillshade(A,idx,c,r,step,vex,gain){
+  const l =(c>=step    &&provOf[idx-step])     ?A[idx-step]     :A[idx];
+  const rr=(c+step<COLS &&provOf[idx+step])    ?A[idx+step]     :A[idx];
+  const u =(r>=step    &&provOf[idx-step*COLS])?A[idx-step*COLS]:A[idx];
+  const dn=(r+step<ROWS &&provOf[idx+step*COLS])?A[idx+step*COLS]:A[idx];
+  const zx=(rr-l)*0.5*vex, zy=(dn-u)*0.5*vex;
+  const nl=Math.sqrt(zx*zx+zy*zy+1);            // 法线 (-zx,-zy,1) 的模
+  const sh=(0.7071*(zx+zy)+0.7071)/nl;          // N·L，L 来自西北 45°
+  let d=(sh-0.7071)/0.7071*gain;                // 相对平地的偏离
+  if(d<-1)d=-1; else if(d>1)d=1;
+  return 128+((d*117)|0);
+}
+let _terrMs=0, _terrHist=null, _shadeMean=0, _shadeSd=0, _shadeSdLo=0;
 function ensureTerrain(){
-  if(terrIdx||!provOf||!provinces||provinces.length<2) return;
+  if(terrHi||!provOf||!provinces||provinces.length<2) return;
   const t0=performance.now();
   const elevA=new Float32Array(NPIX);
-  const biome=new Uint8Array(NPIX);
+  const moistA=new Float32Array(NPIX);
   const coast=buildLandCoast();
+  const macro=buildElevMacro();
+  // 1) 细高程 / 湿度：真实山脉骨架 + 噪声质感
   for(let i=1;i<provinces.length;i++){
     const p=provinces[i]; if(!p||!p.pix.length) continue;
     for(const idx of p.pix){
       const r=(idx/COLS)|0, c=idx%COLS;
       const wl=Math.abs(90-(r+0.5)*0.25);
-      let e=0.58*fbmN(c/38,r/38,3,7717,true)+0.42*fbmN(c/23,r/23,3,3391,false);
-      e=(e-0.42)*2.35; if(e<0)e=0; else if(e>1)e=1;
+      // 细高程：多两个倍频，大比例尺下才有细碎的起伏质感
+      const nz=0.58*fbmN(c/30,r/30,4,7717,true)+0.42*fbmN(c/19,r/19,4,3391,false);
+      let e=macro[idx]*0.90+(nz-0.5)*0.42+0.24;
+      if(e<0)e=0; else if(e>1)e=1;
       elevA[idx]=e;
       // 湿度：赤道多雨、副热带干旱、中纬多雨 → 沙漠自动落在南北回归线一带
       const latM=0.5+0.30*Math.cos(wl*Math.PI/25);
       let m=latM*0.62+fbmN(c/57,r/57,3,9091,false)*0.72-0.26;
       if(m<0)m=0; else if(m>1)m=1;
-      biome[idx]=biomeOf(e,m,wl,coast[idx]);
+      moistA[idx]=m;
     }
   }
-  // 坡向明暗：邻格必须是陆地，否则海岸会凭空出现一圈陡坎
-  terrIdx=new Uint8Array(NPIX);
+  // 2) 粗高程 / 湿度（中比例尺用）
+  const elevLo=blurLand(elevA,3,2);
+  const moistLo=blurLand(moistA,2,1);
+  // 3) 两级着色索引
+  terrHi=new Uint16Array(NPIX);
+  terrLo=new Uint16Array(NPIX);
+  let sSum=0,sSq=0,sN=0, sSum2=0,sSq2=0;
   for(let i=1;i<provinces.length;i++){
     const p=provinces[i]; if(!p||!p.pix.length) continue;
     for(const idx of p.pix){
       const r=(idx/COLS)|0, c=idx%COLS;
-      const l =(c>0      &&provOf[idx-1])   ?elevA[idx-1]   :elevA[idx];
-      const rr=(c+1<COLS &&provOf[idx+1])   ?elevA[idx+1]   :elevA[idx];
-      const u =(r>0      &&provOf[idx-COLS])?elevA[idx-COLS]:elevA[idx];
-      const dn=(r+1<ROWS &&provOf[idx+COLS])?elevA[idx+COLS]:elevA[idx];
-      let k=2.5-((rr-l)+(dn-u))*3.0;            // 西北来光
-      if(k<0)k=0; else if(k>TERR_SHADES-1)k=TERR_SHADES-1;
-      terrIdx[idx]=biome[idx]*TERR_SHADES+(k|0);
+      const wl=Math.abs(90-(r+0.5)*0.25);
+      const eH=elevA[idx];
+      // 高处对比更强：山地跳出来，平原保持安静
+      const shH=hillshade(elevA,idx,c,r,1,5.2,2.05*(0.86+0.72*eH));
+      const shL=hillshade(elevLo,idx,c,r,3,11.0,2.05);
+      terrHi[idx]=biomeOf(eH,moistA[idx],wl,coast[idx])*TERR_SHADES+shH;
+      terrLo[idx]=biomeOf(elevLo[idx],moistLo[idx],wl,coast[idx])*TERR_SHADES+shL;
+      sSum+=shH; sSq+=shH*shH; sSum2+=shL; sSq2+=shL*shL; sN++;
     }
   }
-  // 海面：按水深分带，整体再随纬度略作明暗
+  _shadeMean=sN?sSum/sN:0;
+  _shadeSd=sN?Math.sqrt(Math.max(0,sSq/sN-_shadeMean*_shadeMean)):0;
+  _shadeSdLo=sN?Math.sqrt(Math.max(0,sSq2/sN-(sSum2/sN)*(sSum2/sN))):0;
+  // 4) 海面：水深分带 + 纬度明暗 + 陆地投在东南侧的影子（立体感的另一半）
   const sd=buildSeaDepth();
   const d=imgData.data;
   for(let r=0;r<ROWS;r++){
@@ -271,18 +476,22 @@ function ensureTerrain(){
       const i=r*COLS+c; if(provOf[i]) continue;
       const dep=sd[i]-2;                         // 1 = 紧贴海岸
       const col=(dep>=0&&dep<SEA_BANDS.length)?SEA_BANDS[dep]:SEA_DEEP;
+      let k2=1;
+      if((c>0&&provOf[i-1])||(r>0&&provOf[i-COLS])||(c>0&&r>0&&provOf[i-COLS-1])) k2-=0.17;
+      if((c+1<COLS&&provOf[i+1])||(r+1<ROWS&&provOf[i+COLS])||(c+1<COLS&&r+1<ROWS&&provOf[i+COLS+1])) k2+=0.11;
       const o=i*4;
-      d[o]=col[0]*kk; d[o+1]=col[1]*kk; d[o+2]=col[2]*kk; d[o+3]=255;
+      d[o]=col[0]*kk*k2; d[o+1]=col[1]*kk*k2; d[o+2]=col[2]*kk*k2; d[o+3]=255;
     }
   }
   _terrMs=performance.now()-t0;
-  // 各生态占比：性能面板与自动化测试都用得上
+  // 各生态占比 + 坡向明暗的分布：性能面板与自动化测试都用得上
   const hist=new Array(TERR_BIOME.length).fill(0);
   for(let i=1;i<provinces.length;i++){
     const p=provinces[i]; if(!p||!p.pix.length) continue;
-    for(const idx of p.pix) hist[(terrIdx[idx]/TERR_SHADES)|0]++;
+    for(const idx of p.pix) hist[(terrLo[idx]/TERR_SHADES)|0]++;
   }
   _terrHist=hist;
+  terrUseTier(lodTier);
   imgDirty=true; imgBox=null;
 }
 
@@ -516,11 +725,12 @@ function provFill(p){
 }
 function setPx(idx,r,g,b){ const o=idx*4, d=imgData.data; d[o]=r|0; d[o+1]=g|0; d[o+2]=b|0; d[o+3]=255; }
 /* 带地形调制的写入：国色 × 生态色 × 坡向明暗 → 有地貌的底图。
+   用哪一级地形索引、哪张调色表由当前比例尺决定（见 terrUseTier）。
    imgData.data 是 Uint8ClampedArray，越界会自动截断，不必手动 clamp。 */
 function setPxT(idx,r,g,b){
-  const t=terrIdx;
+  const t=terrArr;
   if(!t){ setPx(idx,r,g,b); return; }
-  const k=t[idx]*6, m=TERR_TAB, o=idx*4, d=imgData.data;
+  const k=t[idx]*6, m=terrTab, o=idx*4, d=imgData.data;
   d[o]=r*m[k]+m[k+3]; d[o+1]=g*m[k+1]+m[k+4]; d[o+2]=b*m[k+2]+m[k+5]; d[o+3]=255;
 }
 
@@ -568,9 +778,12 @@ function recolorProvince(pid){
     if(occupied){ const r=Math.floor(idx/COLS), c=idx%COLS; if((r+c)%6>=3) u=of; }
     setPx(idx,u[0]*0.55+cs[0]*0.45,u[1]*0.55+cs[1]*0.45,u[2]*0.55+cs[2]*0.45);
   }
+  // 小比例尺只看国家版图：省界整条不画，只留控制权不同的国界线
+  const showProv=lodTier>=1;
   for(const [q,arr] of p.borderPix){
     const qp=provinces[q];
     const strong=qp&&qp.controller!==p.controller;
+    if(!strong&&!showProv) continue;
     for(const idx of arr){
       // 控制权不同 → 一条压深的国界线；同国省界只是浅浅一道
       if(strong) setPxT(idx,f[0]*0.30,f[1]*0.30,f[2]*0.30);
@@ -584,7 +797,12 @@ function recolorProvAndNbrs(pid){
   const p=provinces[pid];
   if(p) for(const q of p.nbrs) recolorProvince(q);
 }
-function recolorAll(){ ensureTerrain(); for(let i=1;i<provinces.length;i++) recolorProvince(i); imgDirty=true; imgBox=null; }
+function recolorAll(){
+  ensureTerrain();
+  terrUseTier(lodTier);
+  for(let i=1;i<provinces.length;i++) recolorProvince(i);
+  imgDirty=true; imgBox=null;
+}
 
 function updateSelOverlay(){
   selData=new ImageData(COLS,ROWS);
@@ -806,6 +1024,10 @@ document.addEventListener('visibilitychange',()=>{ if(!document.hidden){ _frameK
 
 function render(t){
   if(!needsRender(t||0)){ _skips++; return; }
+  // 比例尺换了档（省界 / 地形细节 / 城镇是否出现）就整体重新着色一次。
+  // 只在跨过阈值那一帧发生，带迟滞所以不会在阈值上来回抖。
+  const tier=lodTierFor(cam.z,lodTier);
+  if(tier!==lodTier){ lodTier=tier; recolorAll(); }
   _redraws++; _lastRealRender=t||0;
   let _t=performance.now();
   ctx.setTransform(dpr,0,0,dpr,0,0);
@@ -909,15 +1131,113 @@ function drawLabels(){
 }
 
 /* ---------- 城镇层 ----------
-   每个省在「离质心最近的本省陆地像素」上放一个聚落标记，大小按开发度分四级，
-   国都再额外顶一颗金星。位置只跟地形有关，算一次就缓存进 p._tpx。
-   图层和标签层一样按相机指纹缓存：平移/缩放时才重画一次，静止帧零开销；
-   所有同类标记合成一条路径批量描边+填充，几百个城镇也只有几次 canvas 调用。 */
+   每个省在「离质心最近的本省陆地像素」上放一座聚落，规模按开发度分四级，
+   国都另有一套带金旗的图标。位置只跟地形有关，算一次就缓存进 p._tpx。
+
+   图标不是黑点：按等级预渲染成小图（超采样 3 倍再缩下来，边缘才平滑），
+   绘制时只做一次 drawImage。图层和标签层一样按相机指纹缓存 ——
+   平移/缩放时才重画一次，静止帧零开销。 */
 const townCv=document.createElement('canvas');
 const tctx=townCv.getContext('2d');
-const TOWN_R=[1.7,2.3,3.0,3.9];        // 村镇 / 城镇 / 城市 / 大城
-const TOWN_Z_CITY=2.2;                 // 到这个缩放才显示城市及以上（含国都）
-const TOWN_Z_ALL=4.8;                  // 到这个缩放才显示所有村镇
+const TOWN_BOX=[18,22,27,32];          // 村镇 / 城镇 / 城市 / 大城 的图标边长（CSS px，随比例尺再放大）
+/* 城镇密度：一个省一座，2007 个省全画出来就是满屏的图标。
+   所以按重要性分层放出来 —— 国都和城市先出现，村镇要放得很大才画。 */
+const TOWN_Z_CITY=3.4;                 // 国都 + 城市
+const TOWN_Z_TOWN=6.0;                 // 再加城镇
+const TOWN_Z_VILL=10.0;                // 再加村镇
+const TOWN_SS=3;                       // 超采样倍数
+const _townSprite=[];
+
+/* 图标要压在任意颜色的国土和地形上，所以先整块描一圈浅色「贴纸边」再上色。
+   _townMode 控制当前画的是光环还是正式配色。 */
+let _townMode='color';
+const HaloFill='rgba(250,246,234,0.94)';
+function wallFill(){ return _townMode==='halo'?HaloFill:'#fbf5e4'; }
+function roofFill(){ return _townMode==='halo'?HaloFill:'#b05a38'; }
+function lineCol(){ return _townMode==='halo'?HaloFill:'#3a2a1a'; }
+function lineW(){ return _townMode==='halo'?2.6:0.85; }
+/* 用 moveTo/lineTo 拼矩形路径，不用 rect()/ellipse()：
+   这两个方法在测试用的画布桩里没有实现，绕开它们省得每处都补。 */
+function rectPath(g,x,y,w,h){
+  g.moveTo(x,y); g.lineTo(x+w,y); g.lineTo(x+w,y+h); g.lineTo(x,y+h); g.closePath();
+}
+
+/* 一栋小房子：浅色墙体 + 深色描边 + 瓦色屋顶 */
+function house(g,x,y,w,h){
+  g.beginPath(); rectPath(g,x-w/2,y-h/2,w,h);
+  g.fillStyle=wallFill(); g.fill();
+  g.strokeStyle=lineCol(); g.lineWidth=lineW(); g.stroke();
+  g.beginPath(); rectPath(g,x-w/2,y-h/2,w,h*0.42);
+  g.fillStyle=roofFill(); g.fill();
+}
+/* 塔楼 / 教堂：比房子高一点，顶上带尖 */
+function tower(g,x,y,w,h){
+  g.beginPath(); rectPath(g,x-w/2,y-h/2,w,h);
+  g.fillStyle=wallFill(); g.fill();
+  g.strokeStyle=lineCol(); g.lineWidth=lineW(); g.stroke();
+  g.beginPath();
+  g.moveTo(x-w/2-0.6,y-h/2); g.lineTo(x,y-h/2-2.2); g.lineTo(x+w/2+0.6,y-h/2);
+  g.closePath();
+  g.fillStyle=roofFill(); g.fill(); g.stroke();
+}
+/* 城墙：厚浅色圈 + 深色中线，四周加角楼 */
+function townWall(g,cx,cy,r,towers){
+  g.beginPath(); g.arc(cx,cy,r,0,6.2832);
+  g.strokeStyle=wallFill(); g.lineWidth=_townMode==='halo'?3.4:3.0; g.stroke();
+  g.strokeStyle=lineCol(); g.lineWidth=_townMode==='halo'?2.6:1.0; g.stroke();
+  for(let k=0;k<towers;k++){
+    const a=k*Math.PI*2/towers+Math.PI/towers;
+    const tx=cx+Math.cos(a)*r, ty=cy+Math.sin(a)*r;
+    g.beginPath(); rectPath(g,tx-2.0,ty-2.0,4.0,4.0);
+    g.fillStyle=wallFill(); g.fill();
+    g.strokeStyle=lineCol(); g.lineWidth=lineW(); g.stroke();
+  }
+}
+function townShapes(g,cx,cy,tier,cap){
+  const R=[0,0,6.6,8.6][tier];
+  if(tier>=2) townWall(g,cx,cy,R,tier===2?4:6);
+  const spots = tier===0 ? [[-2.7,1.0],[2.6,-1.2],[-0.3,2.6]]
+              : tier===1 ? [[-4.3,1.6],[0.4,-2.6],[4.5,1.2],[-1.2,3.2],[2.6,3.4]]
+              : tier===2 ? [[-3.6,1.4],[1.0,-2.6],[3.9,1.8],[-1.2,3.4],[3.0,-0.6],[-3.2,-1.6]]
+              :            [[-5.2,1.8],[1.2,-3.8],[5.4,1.6],[-1.8,4.6],[4.0,4.2],[-4.6,-2.0],[3.2,-2.4],[0.2,1.4]];
+  const w0=tier===0?4.4:4.8, h0=tier===0?3.6:3.9;
+  for(const [dx,dy] of spots) house(g,cx+dx,cy+dy,w0,h0);
+  if(tier>=1) tower(g,cx+(tier>=2?0:5.6),cy-(tier>=2?R*0.55:4.6),3.6,5.4);
+  if(cap){
+    // 国都：城头竖一面金旗
+    const px=cx+(tier>=2?0:6.6), py=cy-(tier>=2?R+6.0:8.6);
+    g.beginPath(); g.moveTo(px,py); g.lineTo(px,py+8.4);
+    g.strokeStyle=lineCol(); g.lineWidth=_townMode==='halo'?2.6:1.2; g.stroke();
+    g.beginPath(); g.moveTo(px,py); g.lineTo(px+6.8,py+2.3); g.lineTo(px,py+4.6); g.closePath();
+    g.fillStyle=_townMode==='halo'?HaloFill:'#f0cd72'; g.fill();
+    if(_townMode!=='halo'){ g.strokeStyle='#6d4c10'; g.lineWidth=0.85; g.stroke(); }
+  }
+}
+function paintTown(g,cx,cy,tier,cap){
+  // 落地阴影：不管压在什么颜色的国土上都立得起来。
+  // 用 save/scale/arc 画椭圆而不是 ellipse()：后者在部分画布桩里没有实现。
+  const R=[0,0,6.6,8.6][tier];
+  g.save(); g.translate(cx,cy+1.8); g.scale(1,0.62);
+  g.beginPath(); g.arc(0,0,R?R+1.6:7.8,0,6.2832);
+  g.restore();
+  g.fillStyle='rgba(24,16,6,0.26)'; g.fill();
+  _townMode='halo'; townShapes(g,cx,cy,tier,cap);
+  _townMode='color'; townShapes(g,cx,cy,tier,cap);
+}
+function townSprite(tier,cap){
+  const k=tier*2+(cap?1:0);
+  let cv=_townSprite[k];
+  if(cv) return cv;
+  const box=TOWN_BOX[tier]+(cap?5:0);
+  cv=document.createElement('canvas');
+  cv.width=Math.ceil(box*TOWN_SS); cv.height=Math.ceil(box*TOWN_SS);
+  const g=cv.getContext('2d');
+  g.setTransform(TOWN_SS,0,0,TOWN_SS,0,0);
+  g.lineJoin='round';
+  paintTown(g,box/2,box/2+ (cap?1.6:0),tier,cap);
+  _townSprite[k]=cv;
+  return cv;
+}
 
 function ensureTownTable(){
   if(_townWorld===provinces) return;
@@ -935,18 +1255,12 @@ function ensureTownTable(){
     p._tpx=best; if(best>=0) _townCount++;
   }
 }
-function star5(g,x,y,ro,ri){
-  for(let i=0;i<10;i++){
-    const a=-Math.PI/2+i*Math.PI/5, rr=(i&1)?ri:ro;
-    const px=x+Math.cos(a)*rr, py=y+Math.sin(a)*rr;
-    if(i===0) g.moveTo(px,py); else g.lineTo(px,py);
-  }
-  g.closePath();
-}
 function drawTowns(){
-  const z=cam.z, rural=z>=TOWN_Z_ALL;
-  const [wx0,wy0]=s2w(-20,-20), [wx1,wy1]=s2w(cw+20,ch+20);
-  const buckets=[[],[],[],[]], caps=[];
+  const [wx0,wy0]=s2w(-30,-30), [wx1,wy1]=s2w(cw+30,ch+30);
+  // 当前比例尺下最低要画到哪一级（国都不受限制）
+  const minTier = cam.z>=TOWN_Z_VILL?0 : cam.z>=TOWN_Z_TOWN?1 : 2;
+  // 放得越大，图标也越大；不然放到底还是一堆看不清的小点
+  const sc=clamp(0.80+cam.z*0.075,1,1.8);
   let n=0;
   for(let i=1;i<provinces.length;i++){
     const p=provinces[i];
@@ -959,38 +1273,24 @@ function drawTowns(){
     const dev=(p.tax||0)+(p.prod||0)+(p.man||0);
     let tier=dev>=10?3:dev>=8?2:dev>=6?1:0;
     if(isCap&&tier<2) tier=2;
-    if(!rural&&!isCap&&tier<2) continue;
+    if(!isCap&&tier<minTier) continue;
     const [sx,sy]=w2s(wx,wy);
-    buckets[tier].push(sx,sy); n++;
-    if(isCap) caps.push(sx,sy);
+    const box=(TOWN_BOX[tier]+(isCap?5:0))*sc;
+    tctx.drawImage(townSprite(tier,isCap),sx-box/2,sy-box/2,box,box);
+    n++;
   }
-  if(!n) return;
-  _townCount=n; _townHasContent=true;
-  tctx.lineJoin='round';
-  // 先描一圈浅色再填深色：不管底下压着什么国色都看得清
-  tctx.beginPath();
-  for(let k=0;k<4;k++){
-    const a=buckets[k], rr=TOWN_R[k];
-    for(let i=0;i<a.length;i+=2){ tctx.moveTo(a[i]+rr,a[i+1]); tctx.arc(a[i],a[i+1],rr,0,6.2832); }
-  }
-  tctx.lineWidth=2.6; tctx.strokeStyle='rgba(247,240,222,0.92)'; tctx.stroke();
-  tctx.fillStyle='#241b12'; tctx.fill();
-  if(caps.length){
-    tctx.beginPath();
-    for(let i=0;i<caps.length;i+=2) star5(tctx,caps[i],caps[i+1]-6.2,3.7,1.6);
-    tctx.lineWidth=1.4; tctx.strokeStyle='rgba(34,24,12,0.95)'; tctx.stroke();
-    tctx.fillStyle='#f2cf6e'; tctx.fill();
-  }
+  if(n){ _townCount=n; _townHasContent=true; }
 }
 function ensureTownLayer(){
-  const key=cam.x.toFixed(2)+'|'+cam.y.toFixed(2)+'|'+cam.z.toFixed(4)+'|'+cw+'|'+ch+'|'+dpr+'|'+labelEpoch;
+  const key=cam.x.toFixed(2)+'|'+cam.y.toFixed(2)+'|'+cam.z.toFixed(4)+'|'+cw+'|'+ch+'|'+dpr+'|'+labelEpoch+'|'+lodTier;
   if(key===townKey) return;
   townKey=key; _townCount=0; _townHasContent=false;
   const w=Math.max(1,Math.floor(cw*dpr)), h=Math.max(1,Math.floor(ch*dpr));
   if(townCv.width!==w||townCv.height!==h){ townCv.width=w; townCv.height=h; }
   tctx.setTransform(1,0,0,1,0,0); tctx.clearRect(0,0,w,h);
   tctx.setTransform(dpr,0,0,dpr,0,0);
-  if(cam.z<TOWN_Z_CITY) return;
+  // 城镇只在大比例尺出现
+  if(lodTier<2) return;
   if(!provinces||provinces.length<2) return;
   ensureTownTable();
   drawTowns();
