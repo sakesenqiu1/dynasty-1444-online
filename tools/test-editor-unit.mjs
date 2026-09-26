@@ -491,15 +491,16 @@ const t15d = run(`
   const err=buildWorldFromScenario(sc);
   const alive=countries.filter(c=>c&&c.alive).map(c=>c.name).sort();
   const unowned=provinces.filter(p=>p&&p.pix.length&&p.owner===0).length;
+  const total=provinces.filter(p=>p&&p.pix.length).length;
   setHumans([A,B]); player=A; started=true;
   for(let i=0;i<400;i++) tickDay();
-  return { A, B, err, alive, unowned, day:dayCount, armyN:armies.length,
+  return { A, B, err, alive, unowned, total, day:dayCount, armyN:armies.length,
            aProv:countries[A].provList.length, bProv:countries[B].provList.length,
            scCountries:Object.keys(sc.countries).length, scProvinces:Object.keys(sc.provinces).length };
 `);
 check('两个新国家都建出来了', t15d.alive.length === 2 && t15d.alive.join(',') === '乙国,甲国', t15d.alive);
 check('领土数正确', t15d.aProv === 200 && t15d.bProv === 100, t15d);
-check('其余仍是荒地', t15d.unowned === 2007 - 300, t15d.unowned);
+check(`其余仍是荒地（${t15d.unowned}/${t15d.total}，画进去 300 省）`, t15d.unowned === t15d.total - 300, t15d);
 check('【核心】从零画的地图能正常跑 400 天', t15d.err === null && t15d.day === 400, t15d);
 check('剧本体积仍然很小', JSON.stringify(run(`return makeScenario({name:'x'});`)).length < 60000,
   JSON.stringify(run(`return makeScenario({name:'x'});`)).length);

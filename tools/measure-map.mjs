@@ -79,16 +79,49 @@ for (const k of ['4', '8', '12', '20', '30']) {
   console.log(`  ≤${k}px：${stat['le' + k]} 个省 (${(stat['le' + k] / stat.n * 100).toFixed(1)}%)，占陆地面积 ${(stat['areaLE' + k] / stat.total * 100).toFixed(2)}%`);
 }
 
+/* ---- 4) 1~2 像素的碎岛：删掉它们会不会伤到谁 ---- */
+const tinyInfo = run(`
+  const t1=[], t2=[], t3=[];
+  for(let i=1;i<provinces.length;i++){
+    const p=provinces[i]; if(!p||!p.pix.length) continue;
+    if(p.pix.length<=1) t1.push(i);
+    else if(p.pix.length<=2) t2.push(i);
+    else if(p.pix.length<=3) t3.push(i);
+  }
+  const ownerOf=(ids)=>[...new Set(ids.map(i=>provinces[i].owner))].filter(Boolean);
+  // 有没有哪个国家「全部省份」都在这些碎岛里（删了它就没地了）
+  const doomed=new Set([...t1,...t2]);
+  const wiped=[];
+  for(let c=1;c<countries.length;c++){
+    const cc=countries[c]; if(!cc||!cc.provList.length) continue;
+    if(cc.provList.every(pid=>doomed.has(pid))) wiped.push([c,cc.name,cc.provList.length]);
+  }
+  // 有没有哪个国家的首都是碎岛
+  const capDoomed=[];
+  for(let c=1;c<countries.length;c++){
+    const cc=countries[c]; if(cc&&cc.capital&&doomed.has(cc.capital)) capDoomed.push([c,cc.name,provinces[cc.capital].pix.length]);
+  }
+  const sz=(ids)=>ids.map(i=>provinces[i].pix.length).join(',');
+  return { n1:t1.length, n2:t2.length-t1.length, n3:t3.length-t2.length,
+           size1:sz(t1), size2:sz(t2.filter(i=>!t1.includes(i))), size3:sz(t3.filter(i=>!t2.includes(i))),
+           owners1:ownerOf(t1).length, owners2:ownerOf(t2).length,
+           wiped, capDoomed, total:provinces.length };
+`);
+console.log('\n=== 碎岛（1~3 像素） ===');
+console.log(`  1px: ${tinyInfo.n1} 个   2px: ${tinyInfo.n2} 个   3px: ${tinyInfo.n3} 个   共 ${tinyInfo.total} 省`);
+console.log(`  1px 涉及 ${tinyInfo.owners1} 个国家，≤2px 涉及 ${tinyInfo.owners2} 个国家`);
+console.log(`  删掉 ≤2px 会让「一个省都不剩」的国家：${tinyInfo.wiped.length ? JSON.stringify(tinyInfo.wiped) : '无'}`);
+console.log(`  首都落在 ≤2px 碎岛上的国家：${tinyInfo.capDoomed.length ? JSON.stringify(tinyInfo.capDoomed) : '无'}`);
 /* ---- 3) 接缝两侧的陆地看着有多碎 ---- */
 const seam = run(`
   let seamPix=0, seamProv=new Set();
   for(let r=0;r<ROWS;r++) for(const c of [0,1,COLS-2,COLS-1]){
     const i=r*COLS+c; if(provOf[i]){ seamPix++; seamProv.add(provOf[i]); }
   }
-  const countries=new Set();
-  for(const pid of seamProv) countries.add(provinces[pid].owner);
-  return { seamPix, seamProv:seamProv.size, countries:[...countries].filter(Boolean).map(c=>countries0[c]&&countries0[c].name) };
-`.replace('countries0', 'countries'));
+  const cs=new Set();
+  for(const pid of seamProv) cs.add(provinces[pid].owner);
+  return { seamPix, seamProv:seamProv.size, countries:[...cs].filter(Boolean).map(c=>countries[c]&&countries[c].name) };
+`);
 console.log('\n=== 当前接缝（180°）附近的陆地 ===');
 console.log(`  ${seam.seamPix} 个陆地像素，属于 ${seam.seamProv} 个省`);
 console.log('  涉及国家：' + (seam.countries.join('、') || '(无)'));

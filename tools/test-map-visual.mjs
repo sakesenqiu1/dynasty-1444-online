@@ -277,6 +277,99 @@ check('小比例尺下碎地块并入海面（与旁边海水颜色一致）', t
 check('中比例尺下碎地块并入海面（与旁边海水颜色一致）', tiny.medium.got === tiny.medium.sea, tiny.medium);
 check('大比例尺下碎地块照常画出来', tiny.big.got !== tiny.big.sea, tiny.big);
 
+/* ---- 1~2 像素的碎岛已经在世界生成阶段被取消 ---- */
+const pruned = await p.eval(`
+  let min=1e9, n2=0, alive=0;
+  for(let i=1;i<provinces.length;i++){
+    const q=provinces[i]; if(!q) continue;
+    if(q.pix.length){ alive++; if(q.pix.length<min) min=q.pix.length; if(q.pix.length<=2) n2++; }
+  }
+  // 被取消的省份记录还在（编号不变），只是没有像素、不属于任何国家
+  const holes=provinces.filter(q=>q&&!q.pix.length).length;
+  const orphan=provinces.filter(q=>q&&!q.pix.length&&q.owner).length;
+  return { min, n2, alive, holes, orphan, limit:TINY_ISLAND_PIX };
+`);
+check(`1~2 像素的碎岛已从世界取消（最小省份 ${pruned.min} 像素）`, pruned.n2 === 0 && pruned.min > 2, pruned);
+check('取消的省份记录仍保留（编号不变，老地图还能对得上）', pruned.holes > 0, pruned.holes);
+check('被取消的省份不再属于任何国家', pruned.orphan === 0, pruned.orphan);
+
+/* ---- 两端世界必须一模一样 ----
+   浏览器是分步建图（要显示加载进度），服务端是一口气 buildWorld()，
+   曾经因为客户端自己抄了一遍步骤、漏掉「取消碎岛」和「接缝旋转」，
+   两端的栅格错开了 45 列（海军航路会画错位置）。这里逐项比对。 */
+const ref = await (async () => {
+  const { readFileSync } = await import('node:fs');
+  const vm = (await import('node:vm')).default;
+  const noop = () => {};
+  const stub = () => ({ classList: { add: noop, remove: noop, toggle: noop, contains: () => false },
+    addEventListener: noop, appendChild: noop, style: {}, dataset: {}, value: '', textContent: '',
+    innerHTML: '', querySelector: () => null, querySelectorAll: () => [], closest: () => null });
+  const sb = { console, setTimeout, clearTimeout, setInterval, clearInterval,
+    document: { addEventListener: noop, getElementById: stub, createElement: stub, querySelector: () => null, querySelectorAll: () => [] },
+    location: { search: '', pathname: '/', protocol: 'http:', host: 'x' },
+    localStorage: { getItem: () => null, setItem: noop, removeItem: noop }, sessionStorage: { getItem: () => null, setItem: noop },
+    performance: { now: () => Date.now() }, requestAnimationFrame: noop, URLSearchParams };
+  sb.window = sb; sb.globalThis = sb;
+  const c = vm.createContext(sb);
+  vm.runInContext(readFileSync(join(root, 'web/world_data.js'.replace('_', '-')), 'utf8'), c);
+  vm.runInContext(readFileSync(join(root, 'web/game-core.js'), 'utf8'), c);
+  return vm.runInContext(`(function(){
+    resetWorld(); setSeed(SCENARIO_SEED); buildWorld();
+    let pixSum=0, holes=0, minPix=1e9, provSum=0;
+    for(let i=1;i<provinces.length;i++){ const p=provinces[i]; if(!p) continue;
+      provSum=(provSum+i*p.pix.length)%2147483647;
+      pixSum+=p.pix.length; if(!p.pix.length) holes++; else if(p.pix.length<minPix) minPix=p.pix.length; }
+    let provOfSum=0, landSum=0;
+    for(let i=0;i<NPIX;i++){ provOfSum=(provOfSum*31+provOf[i])%2147483647; landSum=(landSum*31+land[i])%2147483647; }
+    return { n:provinces.length, pixSum, holes, minPix, provSum, provOfSum, landSum, shift:MAP_SHIFT };
+  })()`, c, { filename: 'ref' });
+})();
+const browserWorld = await p.eval(`
+  let pixSum=0, holes=0, minPix=1e9, provSum=0;
+  for(let i=1;i<provinces.length;i++){ const q=provinces[i]; if(!q) continue;
+    provSum=(provSum+i*q.pix.length)%2147483647;
+    pixSum+=q.pix.length; if(!q.pix.length) holes++; else if(q.pix.length<minPix) minPix=q.pix.length; }
+  let provOfSum=0, landSum=0;
+  for(let i=0;i<NPIX;i++){ provOfSum=(provOfSum*31+provOf[i])%2147483647; landSum=(landSum*31+land[i])%2147483647; }
+  return { n:provinces.length, pixSum, holes, minPix, provSum, provOfSum, landSum, shift:MAP_SHIFT };
+`);
+log(`世界指纹 浏览器 ${browserWorld.provOfSum}/${browserWorld.landSum}  服务端内核 ${ref.provOfSum}/${ref.landSum}`);
+check('浏览器和内核建出同一个世界（陆地像素数）', browserWorld.pixSum === ref.pixSum, [browserWorld.pixSum, ref.pixSum]);
+check('两端 provOf 栅格逐像素一致', browserWorld.provOfSum === ref.provOfSum, [browserWorld.provOfSum, ref.provOfSum]);
+check('两端 land 栅格逐像素一致', browserWorld.landSum === ref.landSum, [browserWorld.landSum, ref.landSum]);
+check('两端省份数 / 空省份数一致', browserWorld.n === ref.n && browserWorld.holes === ref.holes,
+  [browserWorld.n, browserWorld.holes, ref.n, ref.holes]);
+check('两端已取消的碎岛一致（最小省份像素数）', browserWorld.minPix === ref.minPix, [browserWorld.minPix, ref.minPix]);
+
+/* ---- 东西环绕：世界是周期性的，跨过接缝能接着走下去 ---- */
+const wrap = await p.eval(`
+  ${VIEW}
+  window.__sig=()=>{
+    const W=mapCv.width, H=mapCv.height, d=ctx.getImageData(0,0,W,H).data;
+    let s=0;
+    for(let y=2;y<H;y+=23) for(let x=2;x<W;x+=17){ const o=(y*W+x)*4; s=(Math.imul(s,31)+d[o]+d[o+1]*3+d[o+2]*7)|0; }
+    return s;
+  };
+  const sigAt=(x,y,z)=>{ __view(z,x,y); _frameKey=''; render(performance.now()); return __sig(); };
+  const W=COLS;
+  const a=sigAt(400,200,2.0), b=sigAt(400+W,200,2.0), c=sigAt(400+W*3,200,2.0);
+  const d=sigAt(0,180,1.9),    e=sigAt(W,180,1.9);
+  // 接缝正中：两边的副本应当拼得上，画面不留空
+  const seamA=sigAt(W-4,120,1.9), seamB=sigAt(-4,120,1.9);
+  return { a,b,c,d,e,seamA,seamB, same1:a===b, same2:a===c, same3:d===e, same4:seamA===seamB,
+           blank:(()=>{ __view(1.9,COLS-6,140); _frameKey=''; render(performance.now());
+             const W2=mapCv.width,H2=mapCv.height,d2=ctx.getImageData(0,0,W2,H2).data;
+             let sea=0,n=0;
+             for(let y=2;y<H2;y+=29) for(let x=2;x<W2;x+=19){ const o=(y*W2+x)*4; n++;
+               if(Math.abs(d2[o]-42)<9&&Math.abs(d2[o+1]-66)<9&&Math.abs(d2[o+2]-96)<12) sea++; }
+             return Math.round(sea/n*1000)/1000; })() };
+`);
+check('东西平移一个整圈后画面完全一致（世界是周期性的）', wrap.same1 === true, wrap);
+check('平移三个整圈也一致', wrap.same2 === true, wrap);
+check('从最东侧绕到最西侧画面一致（东西连起来了）', wrap.same3 === true, wrap);
+check('接缝两侧拼得上（画面不留空）', wrap.same4 === true, wrap);
+check('贴边时画面仍有陆地（不是一片空海）', wrap.blank > 0.01 && wrap.blank < 0.99, wrap.blank);
+
 /* ---- 海域分带 + 陆地投影 ---- */
 const sea = await p.eval(`
   const d=imgData.data; let shallow=0, deep=0, shadow=0;
@@ -409,7 +502,10 @@ const frame = await p.eval(`
   return r;
 `);
 for (const f of frame) log(`z=${f.z} 档${f.tier}  底图合成 ${f.blit}ms  整帧 ${f.render}ms`);
-check('底图合成开销可忽略 (<8ms)', frame.every(f => f.blit < 8), frame.map(f => f.z + ':' + f.blit).join(' '));
+// headless Edge 用的是软件光栅化（--disable-gpu），两张全屏贴图要几毫秒；
+// 真实浏览器走 GPU 合成，这一项接近 0。阈值放宽到 12ms，
+// 只用来兜住「不小心画成整幅贴图」这类退化。
+check('底图合成开销没有退化 (<12ms)', frame.every(f => f.blit < 12), frame.map(f => f.z + ':' + f.blit).join(' '));
 
 /* ---- 截图 ---- */
 const capView = await p.eval("return {x:cam.x, y:cam.y};");

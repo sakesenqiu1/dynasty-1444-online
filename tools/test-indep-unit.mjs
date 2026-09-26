@@ -165,7 +165,12 @@ const t4 = run(`${SETUP}
   invalidateCamps();
   uiTab='diplo'; diploFocus=0; diploColorFor=0; uiSearch=''; refreshPanel();
   const html=document.getElementById('diplo-list').innerHTML;
-  const row=(id)=>{ const i=html.indexOf('data-act="diplo-info" data-v="'+id+'"'); return html.slice(i, i+800); };
+  // 按「下一个 diplo-info 出现的位置」截断，不能用固定长度窗口：
+  // 窗口跨到隔壁国家那一行时，会读到别人的按钮
+  const row=(id)=>{ const key='data-act="diplo-info" data-v="'+id+'"';
+    const i=html.indexOf(key); if(i<0) return '';
+    const j=html.indexOf('data-act="diplo-info" data-v="', i+key.length);
+    return html.slice(i, j<0?html.length:j); };
   const rowO=row(o.id), rowThird=row(third.id);
   return { o:o.id, third:third.id,
            oHasIndep:rowO.includes('⚔ 独立战争'),

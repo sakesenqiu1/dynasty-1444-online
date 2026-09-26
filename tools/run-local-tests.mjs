@@ -22,10 +22,15 @@ const SLOW = {
   'test-jitter.mjs': 300000, 'test-memory.mjs': 300000, 'test-load-long.mjs': 300000,
 };
 const only = process.argv.slice(2);
+/* 先跑「量线上服务器帧耗时」的那个：它读的是服务端累积的 tickMax，
+   别的用例每开一局都会在服务器上留下一个房间（房间要闲置几分钟才回收），
+   等一堆房间同时跑月度结算，tickMax 必然被抬上去，那条断言就假失败了。
+   所以它必须趁服务器还干净的时候先跑。 */
+const FIRST = ['test-jitter.mjs'];
 const files = readdirSync(tools)
   .filter(f => /^test-.*\.mjs$/.test(f) && !SKIP.has(f))
   .filter(f => !only.length || only.some(o => f.includes(o)))
-  .sort();
+  .sort((a, b) => (FIRST.indexOf(a) + 1 || 999) - (FIRST.indexOf(b) + 1 || 999) || a.localeCompare(b));
 
 let totalPass = 0, totalFail = 0, skipped = 0;
 const bad = [];

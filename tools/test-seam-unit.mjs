@@ -37,11 +37,11 @@ const COLS_DISPLAY = 1440;
 
 console.log('\n=== 地图接缝旋转 ===\n');
 
-/* ---- 旋转前的世界（把 MAP_SHIFT 临时关掉，拿一份参照） ---- */
+/* ---- 旋转前的世界（关掉旋转，但碎岛裁剪照做，拿一份可比对的参照） ---- */
 const A = newCtx();
 run(A, `resetWorld(); setSeed(SCENARIO_SEED);
   const feats=decodeTopo(WORLD_DATA); const {cidMap}=buildLand(feats);
-  buildProvinces(cidMap,feats); buildCountries(cidMap,feats);`);
+  buildProvinces(cidMap,feats); pruneTinyIslands(); buildCountries(cidMap,feats);`);
 const before = run(A, `
   return {
     n:provinces.length,

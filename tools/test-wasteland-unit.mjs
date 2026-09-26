@@ -61,10 +61,14 @@ function sim(days) {
 }
 const stats = () => {
   const P = core.provinces(), C = core.countries();
-  let unowned = 0, owned = 0, holes = 0;
-  for (let i = 1; i < P.length; i++) { if (!P[i].pix.length) continue; if (P[i].owner === 0) unowned++; else owned++; }
+  let unowned = 0, owned = 0, holes = 0, total = 0;
+  for (let i = 1; i < P.length; i++) {
+    if (!P[i].pix.length) continue;      // 1~2 像素的碎岛已在建图时取消，不算省份
+    total++;
+    if (P[i].owner === 0) unowned++; else owned++;
+  }
   for (let i = 1; i < C.length; i++) if (!C[i]) holes++;
-  return { unowned, owned, alive: C.filter(c => c && c.alive).length, holes, countries: C.length };
+  return { unowned, owned, total, alive: C.filter(c => c && c.alive).length, holes, countries: C.length };
 };
 
 console.log('\n=== 无主荒地 / 数组空洞 回归测试 ===\n');
@@ -77,7 +81,7 @@ const t1 = run(`
 `);
 check('全荒地剧本能建出世界', core.buildWorldFromScenario(t1) === null, core.buildWorldFromScenario(t1));
 let s = stats();
-check('所有省份都无主', s.unowned === 2007 && s.owned === 0, s);
+check(`所有省份都无主（共 ${s.total} 省）`, s.unowned === s.total && s.owned === 0, s);
 check('没有任何存活国家', s.alive === 0, s);
 check('【核心】全荒地跑 900 天不崩', sim(900) === null, '崩了');
 
@@ -167,12 +171,14 @@ const t5 = run(`
   applySaveData(JSON.parse(JSON.stringify(snap)));
   const p=provinces[pid], c=countries[201];
   return { pid, owner:p.owner, alive:c.alive, provs:c.provList.length, armyN:armies.length,
+           total:provinces.filter(q=>q&&q.pix.length).length,
            unowned:provinces.filter(q=>q&&q.pix.length&&q.owner===0).length };
 `);
 check('存档往返后归属保留', t5.owner === 201, t5);
 check('新国家仍然存活且领土正确', t5.alive === true && t5.provs === 1, t5);
 check('军队保留', t5.armyN === 1, t5);
-check('荒地状态保留', t5.unowned === 2006, t5);
+check(`荒地状态保留（${t5.unowned}/${t5.total} 无主，只有新国家那 1 省有主）`,
+  t5.unowned === t5.total - 1 && t5.owner === 201, t5);
 
 /* ================= 6. 从零画一张完整地图 ================= */
 console.log('\n-- 6. 从零画一张地图并真的玩起来 --');

@@ -687,6 +687,10 @@ function resize(){
 window.addEventListener('resize',resize); resize();
 function w2s(x,y){ return [(x-cam.x)*cam.z+cw/2,(y-cam.y)*cam.z+ch/2]; }
 function s2w(x,y){ return [(x-cw/2)/cam.z+cam.x,(y-ch/2)/cam.z+cam.y]; }
+/* 东西环绕：世界 x 有无数个等价的副本（相差整数个 COLS）。
+   画标签/城镇/部队时取离相机最近的那一份，跨过接缝才不会被判成「在屏幕外」。 */
+function wrapX(x){ return wrapWorldX(x); }
+function nearX(x){ return nearestWorldX(x,cam.x); }
 
 /* 外交配色（地图外交模式与外交面板共用同一套）
    我朝与盟友同为蓝色；我方附庸浅紫、我方傀儡深紫；
@@ -1113,22 +1117,29 @@ function render(t){
   if(selDirty){ sctx.putImageData(selData,0,0); selDirty=false; }
   if(bordDirty) repaintBorders();
   _msPut=_msPut*0.85+(performance.now()-_t)*0.15; _t=performance.now();
-  const tx=(cw/2-cam.x*cam.z)*dpr, ty=(ch/2-cam.y*cam.z)*dpr;
-  ctx.setTransform(cam.z*dpr,0,0,cam.z*dpr,tx,ty);
-  // 只贴视野内那一块：放得很大时整幅贴图在软件渲染下要几毫秒
-  const [vwx0,vwy0]=s2w(0,0), [vwx1,vwy1]=s2w(cw,ch);
-  const bx=clamp(Math.floor(vwx0)-1,0,COLS), by=clamp(Math.floor(vwy0)-1,0,ROWS);
-  const bw=clamp(Math.ceil(vwx1)+1,0,COLS)-bx, bh=clamp(Math.ceil(vwy1)+1,0,ROWS)-by;
-  const sub=(cv)=>{ if(bw>0&&bh>0&&(bw<COLS||bh<ROWS)) ctx.drawImage(cv,bx,by,bw,bh,bx,by,bw,bh); else ctx.drawImage(cv,0,0); };
-  // 底图用双线性：地形是连续起伏，放大后也要平滑
-  ctx.imageSmoothingEnabled=true;
-  sub(provCv);
-  // 边界层用最近邻：放大后是一条硬边，不会被插值糊成一团
-  ctx.imageSmoothingEnabled=cam.z<1.5;
-  sub(bordCv);
-  ctx.imageSmoothingEnabled=true;
-  if(cedeMap.on||grantMap.on){ if(cedeDirty){ cctx.putImageData(cedeData,0,0); cedeDirty=false; } ctx.drawImage(cedeCv,0,0); }
-  if(selectedProv>0) ctx.drawImage(selCv,0,0);
+  /* 世界是东西环绕的：地图按若干个 -COLS/0/+COLS 的副本铺开，
+     相机跨过接缝时看到的是隔壁那一份，所以可以一直往东（西）拖下去。
+     只画与视野相交的那几份，正常情况就是一份。 */
+  const halfW=cw/(2*cam.z), halfH=ch/(2*cam.z);
+  const by=clamp(Math.floor(cam.y-halfH)-1,0,ROWS), bh=clamp(Math.ceil(cam.y+halfH)+1,0,ROWS)-by;
+  const k0=Math.floor((cam.x-halfW)/COLS), k1=Math.floor((cam.x+halfW)/COLS);
+  for(let k=k0;k<=k1;k++){
+    const ox=k*COLS;
+    const bx=clamp(Math.floor(cam.x-halfW-ox)-1,0,COLS), bw=clamp(Math.ceil(cam.x+halfW-ox)+1,0,COLS)-bx;
+    if(bw<=0||bh<=0) continue;
+    const tx=(cw/2-(cam.x-ox)*cam.z)*dpr, ty=(ch/2-cam.y*cam.z)*dpr;
+    ctx.setTransform(cam.z*dpr,0,0,cam.z*dpr,tx,ty);
+    const sub=(cv)=>{ if(bw<COLS||bh<ROWS) ctx.drawImage(cv,bx,by,bw,bh,bx,by,bw,bh); else ctx.drawImage(cv,0,0); };
+    // 底图用双线性：地形是连续起伏，放大后也要平滑
+    ctx.imageSmoothingEnabled=true;
+    sub(provCv);
+    // 边界层用最近邻：放大后是一条硬边，不会被插值糊成一团
+    ctx.imageSmoothingEnabled=cam.z<1.5;
+    sub(bordCv);
+    ctx.imageSmoothingEnabled=true;
+    if(cedeMap.on||grantMap.on){ if(cedeDirty){ cctx.putImageData(cedeData,0,0); cedeDirty=false; } sub(cedeCv); }
+    if(selectedProv>0) sub(selCv);
+  }
   // 城镇层是设备像素尺寸的画布，必须用单位变换 1:1 贴上去（同标签层）
   ensureTownLayer();
   if(_townHasContent){ ctx.setTransform(1,0,0,1,0,0); ctx.drawImage(townCv,0,0); }
@@ -1175,7 +1186,7 @@ function drawLabels(){
     lctx.lineWidth=3; lctx.strokeStyle='rgba(0,0,0,0.75)'; lctx.fillStyle='#f0e6cf';
     for(let c=1;c<countries.length;c++){
       const cc=countries[c]; if(!cc||!cc.alive||!cc.lx) continue;
-      const [sx,sy]=w2s(cc.lx,cc.ly);
+      const [sx,sy]=w2s(nearX(cc.lx),cc.ly);
       if(sx<-60||sx>cw+60||sy<0||sy>ch) continue;
       _labelHasContent=true;
       lctx.strokeText(cc.name,sx,sy); lctx.fillText(cc.name,sx,sy);
@@ -1183,11 +1194,11 @@ function drawLabels(){
   } else {
     lctx.font='10px "Microsoft YaHei",sans-serif';
     lctx.lineWidth=2; lctx.strokeStyle='rgba(0,0,0,0.6)'; lctx.fillStyle='rgba(235,225,200,0.8)';
-    const [wx0,wy0]=s2w(0,0),[wx1,wy1]=s2w(cw,ch);
     for(let i=1;i<provinces.length;i++){
       const p=provinces[i]; if(!p||!p.pix.length) continue;
-      if(p.cx<wx0||p.cx>wx1||p.cy<wy0||p.cy>wy1) continue;
-      const [sx,sy]=w2s(p.cx,p.cy+7);
+      // 按屏幕坐标裁剪（世界坐标在接缝两侧不连续，不能直接比大小）
+      const [sx,sy]=w2s(nearX(p.cx),p.cy+7);
+      if(sx<-40||sx>cw+40||sy<0||sy>ch) continue;
       _labelHasContent=true;
       lctx.strokeText(p.name,sx,sy); lctx.fillText(p.name,sx,sy);
     }
@@ -1321,7 +1332,6 @@ function ensureTownTable(){
   }
 }
 function drawTowns(){
-  const [wx0,wy0]=s2w(-30,-30), [wx1,wy1]=s2w(cw+30,ch+30);
   // 当前比例尺下最低要画到哪一级（国都不受限制）
   const minTier = cam.z>=TOWN_Z_VILL?0 : cam.z>=TOWN_Z_TOWN?1 : 2;
   // 放得越大，图标也越大；不然放到底还是一堆看不清的小点
@@ -1331,15 +1341,16 @@ function drawTowns(){
     const p=provinces[i];
     if(!p||!(p._tpx>=0)) continue;
     const r=(p._tpx/COLS)|0, c=p._tpx%COLS;
-    const wx=c+0.5, wy=r+0.5;
-    if(wx<wx0||wx>wx1||wy<wy0||wy>wy1) continue;
+    const wy=r+0.5;
+    // 取离相机最近的那一份；再按屏幕坐标裁剪（世界坐标跨接缝不连续）
+    const [sx,sy]=w2s(nearX(c+0.5),wy);
+    if(sx<-40||sx>cw+40||sy<-40||sy>ch+40) continue;
     const own=countries[p.owner]||countries[p.controller];
     const isCap=!!(own&&own.alive&&own.capital===p.id);
     const dev=(p.tax||0)+(p.prod||0)+(p.man||0);
     let tier=dev>=10?3:dev>=8?2:dev>=6?1:0;
     if(isCap&&tier<2) tier=2;
     if(!isCap&&tier<minTier) continue;
-    const [sx,sy]=w2s(wx,wy);
     const box=(TOWN_BOX[tier]+(isCap?5:0))*sc;
     tctx.drawImage(townSprite(tier,isCap),sx-box/2,sy-box/2,box,box);
     n++;
@@ -1383,7 +1394,7 @@ function drawRecruits(){
   ctx.textAlign='center';
   for(const r of recruits){
     const p=provinces[r.prov]; if(!p||!p.pix.length) continue;
-    const [sx,sy]=w2s(p.cx,p.cy);
+    const [sx,sy]=w2s(nearX(p.cx),p.cy);
     if(sx<-30||sx>cw+30||sy<-30||sy>ch+30) continue;
     const c=countries[r.owner];
     const col=c?c.color:[200,200,200];
@@ -1410,14 +1421,14 @@ function drawArmies(){
       let [px,py]=w2s(...armyPos(sa)); ctx.moveTo(px,py);
       for(let i=sa.navIdx;i<sa.navPath.length;i++){
         const pix=sa.navPath[i], r=(pix/COLS)|0, c=pix%COLS;
-        const [x,y]=w2s(c+0.5,r+0.5); ctx.lineTo(x,y);
+        const [x,y]=w2s(nearX(c+0.5),r+0.5); ctx.lineTo(x,y);
       }
       ctx.stroke(); ctx.setLineDash([]);
     } else if(sa.path.length){
       ctx.strokeStyle='rgba(255,215,120,0.85)'; ctx.lineWidth=2; ctx.setLineDash([6,5]);
       ctx.beginPath();
       let [px,py]=w2s(...armyPos(sa)); ctx.moveTo(px,py);
-      for(const pid of sa.path){ const p=provinces[pid]; const [x,y]=w2s(p.cx,p.cy); ctx.lineTo(x,y); }
+      for(const pid of sa.path){ const p=provinces[pid]; const [x,y]=w2s(nearX(p.cx),p.cy); ctx.lineTo(x,y); }
       ctx.stroke(); ctx.setLineDash([]);
     }
   }
@@ -1426,7 +1437,7 @@ function drawArmies(){
   const vis=[];
   for(const a of armies){
     const [wx,wy]=armyPos(a);
-    const [sx,sy]=w2s(wx,wy);
+    const [sx,sy]=w2s(nearX(wx),wy);
     if(sx<-30||sx>cw+30||sy<-30||sy>ch+30) continue;
     vis.push([a,sx,sy]);
   }
@@ -1475,7 +1486,7 @@ function drawSiegeBars(){
   for(let i=1;i<provinces.length;i++){
     const p=provinces[i];
     if(p.siege>0&&p.pix.length){
-      const [sx,sy]=w2s(p.cx,p.cy);
+      const [sx,sy]=w2s(nearX(p.cx),p.cy);
       if(sx<0||sx>cw||sy<0||sy>ch) continue;
       ctx.fillStyle='rgba(0,0,0,0.6)'; ctx.fillRect(sx-11,sy+9,22,4);
       ctx.fillStyle='#e8b050'; ctx.fillRect(sx-10,sy+10,20*clamp(p.siege/100,0,1),2);
@@ -3458,19 +3469,22 @@ window.addEventListener('mousemove',e=>{
 window.addEventListener('mouseup',e=>{
   if(!dragging) return;
   dragging=false; mapCv.classList.remove('dragging');
+  // 拖完把 x 折回 [0,COLS)：画面完全等价，但免得一直拖下去把浮点精度拖没
+  cam.x=wrapX(cam.x);
   if(!dragMoved&&e.target===mapCv) handleClick(e.clientX,e.clientY);
 });
 mapCv.addEventListener('wheel',e=>{
   e.preventDefault();
   const f=e.deltaY<0?1.18:1/1.18;
   const [wx,wy]=s2w(e.clientX,e.clientY);
-  cam.z=clamp(cam.z*f,Math.min(cw/COLS,ch/ROWS)*0.75,24);
+  // 最小缩放正好让世界铺满：再小就会看见地图重复的第二份
+  cam.z=clamp(cam.z*f,Math.min(cw/COLS,ch/ROWS),24);
   const [wx2,wy2]=s2w(e.clientX,e.clientY);
   cam.x+=wx-wx2; cam.y+=wy-wy2;
 },{passive:false});
 mapCv.addEventListener('dblclick',e=>{
   const [wx,wy]=s2w(e.clientX,e.clientY);
-  cam.x=wx; cam.y=wy;
+  cam.x=wrapX(wx); cam.y=wy;
 });
 mapCv.addEventListener('contextmenu',e=>{
   e.preventDefault();
@@ -3493,7 +3507,8 @@ function handleClick(sx,sy){
   // 1) 军队拾取
   let best=null,bd=14;
   for(const a of armies){
-    const [ax,ay]=w2s(...armyPos(a));
+    const [wx,wy]=armyPos(a);
+    const [ax,ay]=w2s(nearX(wx),wy);
     const d=Math.hypot(ax-sx,ay-sy);
     if(d<bd){ bd=d; best=a; }
   }
@@ -3503,8 +3518,9 @@ function handleClick(sx,sy){
     updateSelOverlay(); refreshPanel();
     return;
   }
-  // 2) 省份拾取
-  const [wx,wy]=s2w(sx,sy);
+  // 2) 省份拾取（世界东西环绕：把 x 折回 [0,COLS)）
+  const [wx0,wy]=s2w(sx,sy);
+  const wx=wrapX(wx0);
   const c=Math.floor(wx), r=Math.floor(wy);
   let pid=0;
   if(c>=0&&c<COLS&&r>=0&&r<ROWS) pid=provOf[r*COLS+c];
@@ -3717,13 +3733,13 @@ const tickAsync=()=>new Promise(r=>setTimeout(r,20));
 (async function init(){
   try{
     setLoad('解析世界地图……',10); await tickAsync();
-    const feats=decodeTopo(WORLD_DATA);
+    const feats=worldDecode();
     setLoad('绘制大陆与海岸线……',30); await tickAsync();
-    const {cidMap}=buildLand(feats);
+    const cidMap=worldMakeLand(feats);
     setLoad('划分行省边界……',55); await tickAsync();
-    buildProvinces(cidMap,feats);
+    worldMakeProvinces(cidMap,feats);
     setLoad('建立国家与王朝……',80); await tickAsync();
-    buildCountries(cidMap,feats);
+    worldMakeCountries(cidMap,feats);
     setLoad('渲染世界……',95); await tickAsync();
     recolorAll();
     setLoad('完成！',100); await tickAsync();

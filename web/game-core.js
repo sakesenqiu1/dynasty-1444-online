@@ -2096,14 +2096,57 @@ function resetWorld(){
   invalidateCamps();
 }
 /* 构建世界（客户端与服务端必须调用同一路径，保证省界完全一致） */
-function buildWorld(){
-  _worldSeed=_seed>>>0;        // 记下本次建图用的种子（rnd() 之后会把 _seed 推走）
-  const feats=decodeTopo(WORLD_DATA);
-  const {cidMap}=buildLand(feats);
+/* ---------- 碎岛 ----------
+   一两个像素的孤岛在世界里没有任何意义：点不到、守不住、画出来只是麻点。
+   这里把它们**从世界里取消**（像素还给海面），而不是「在某个比例尺下不画」。
+   省份记录保留、编号不变 —— 老剧本和老存档的省份编号仍然对得上；
+   只是这些省份变成空的，不会再出现在任何国家的省份表里。 */
+const TINY_ISLAND_PIX=2;
+function pruneTinyIslands(){
+  const gone=new Set();
+  for(let i=1;i<provinces.length;i++){
+    const p=provinces[i];
+    if(!p||!p.pix||!p.pix.length||p.pix.length>TINY_ISLAND_PIX) continue;
+    for(const idx of p.pix){ land[idx]=0; provOf[idx]=0; }
+    p.pix=[]; p.coastPix=[]; p.borderPix=new Map(); p.nbrs=[];
+    p.owner=0; p.controller=0; p._bb=null;
+    gone.add(i);
+  }
+  if(!gone.size) return 0;
+  // 邻接表里清掉指向已取消省份的引用
+  for(let i=1;i<provinces.length;i++){
+    const p=provinces[i];
+    if(!p||!p.pix.length) continue;
+    if(p.nbrs.length&&p.nbrs.some(q=>gone.has(q))) p.nbrs=p.nbrs.filter(q=>!gone.has(q));
+    if(p.borderPix.size) for(const q of [...p.borderPix.keys()]) if(gone.has(q)) p.borderPix.delete(q);
+  }
+  return gone.size;
+}
+/* 东西环绕：等距圆柱投影的左右两边在世界里是连着的。
+   把任意世界 x 折算到离相机最近的那一份，画标签/城镇/部队时要用。 */
+function wrapWorldX(x){ x%=COLS; return x<0?x+COLS:x; }
+function nearestWorldX(x,refX){ return x+COLS*Math.round((refX-x)/COLS); }
+
+/* ---------- 建图步骤 ----------
+   浏览器要一步一步显示加载进度（每步之间 await 让界面刷一下），
+   服务端要一口气跑完。两边必须走同一串步骤 —— 曾经因为客户端自己
+   抄了一遍顺序、漏掉了「取消碎岛」和「接缝旋转」，导致两端的世界错开 45 列。 */
+function worldDecode(){ _worldSeed=_seed>>>0; return decodeTopo(WORLD_DATA); }
+function worldMakeLand(feats){ return buildLand(feats).cidMap; }
+function worldMakeProvinces(cidMap,feats){
   buildProvinces(cidMap,feats);
+  pruneTinyIslands();
   rotateWorld(MAP_SHIFT);
+}
+function worldMakeCountries(cidMap,feats){
   buildCountries(cidMap,feats);
   ensureAllCountryFields();
+}
+function buildWorld(){
+  const feats=worldDecode();
+  const cidMap=worldMakeLand(feats);
+  worldMakeProvinces(cidMap,feats);
+  worldMakeCountries(cidMap,feats);
   return {cidMap,feats};
 }
 /* 当前世界的可序列化快照 */
@@ -2213,7 +2256,8 @@ if(typeof module!=='undefined'&&module.exports){
     makeSaveData,applySaveData,pushLog,pushLogTo,pushLogWorld,fmtDate,
     ensureCountryFields,ensureAllCountryFields,COUNTRY_NUM_FIELDS,
     decodeTopo,buildLand,buildProvinces,buildCountries,rebuildLabels,recomputeCap,totalDev,devOf,
-    rotateWorld,MAP_SHIFT,
+    rotateWorld,MAP_SHIFT,pruneTinyIslands,TINY_ISLAND_PIX,wrapWorldX,nearestWorldX,
+    worldDecode,worldMakeLand,worldMakeProvinces,worldMakeCountries,
     tickDay,advanceDay,mergeArmies,resolveBattles,resolveSieges,monthlyTick,economy,aiMonthly,
     declareWar,makePeace,transferProvince,checkDeath,vassalize,releaseStaleOccupations,
     warScore,peaceCost,releaseCost,canDemandProvince,occRatio,atWar,inWar,truceBetween,truceKey,
