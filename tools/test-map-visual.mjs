@@ -329,6 +329,80 @@ if (!forts) {
   check('中比例尺不画普通城镇', fortCount.townsDrawn === 0, fortCount.townsDrawn);
 }
 
+/* ---- 点城市：看到的那座城 = 点到的那座城（图标比省还大，不能只看光标下的像素） ---- */
+const pickCity = await p.eval(`
+  ${VIEW}
+  // 找一块放大后视野内能放下好几座城的地方
+  const start=provinces.find(q=>q&&q.pix.length&&q.owner===q.controller&&q.nbrs.length>=3);
+  if(!start) return null;
+  __view(6.0,start.cx,start.cy); _frameKey=''; render(performance.now());
+  const sc=townScale();
+  const cands=[];
+  for(let i=1;i<provinces.length&&cands.length<8;i++){
+    const q=provinces[i];
+    if(!q||!q.pix.length||!q.owner) continue;
+    const b=cityBoxOnScreen(q,sc); if(!b) continue;
+    const x=b.x0+b.g.w/2, y=b.y0+b.g.h/2;
+    if(x<50||x>cw-50||y<50||y>ch-50) continue;
+    cands.push(i);
+  }
+  if(cands.length<3) return null;
+  // 前几座摆上不同等级的城防，其余留作普通城镇
+  const lv=[1,3,5,0,0,0,0,0];
+  cands.forEach((pid,k)=>{ provinces[pid].fort=lv[k]||0; });
+  _bldEpoch++; _frameKey=''; render(performance.now());
+  const sc2=townScale();
+  const prevArmy=selectedArmy; selectedArmy=0;     // 只测省份拾取，别把军队派出去
+  const prevSel=selectedProv;
+  const prevStarted=started; started=true;         // 这个测试是手动调 render()，主循环没跑，点选需要 started
+  let tot=0, centerBad=0, oldBad=0, offTot=0, offBad=0, sample=null, oldSample=null;
+  const diag=[];
+  for(const pid of cands){
+    const b=cityBoxOnScreen(provinces[pid],sc2); if(!b) continue;
+    const x0=b.x0, y0=b.y0, w=b.g.w, h=b.g.h;
+    // ① 图标正中：必须选中这座城
+    const cx=x0+w/2, cy=y0+h/2;
+    const hit=cityHitAt(cx,cy);
+    tot++; if(hit!==pid){ centerBad++; if(!sample) sample=[pid,hit]; }
+    selectedProv=0;
+    handleClick(cx,cy);
+    // 诊断：光标下那一格是谁、附近有没有军队、三种地图模式是否在拦
+    const [dxw,dyw]=s2w(cx,cy); const dr=Math.floor(dyw), dc=Math.floor(wrapX(dxw));
+    const pixelProv=(dr>=0&&dr<ROWS&&dc>=0&&dc<COLS)?provOf[dr*COLS+dc]:0;
+    let nearArmy=0;
+    for(const a of armies){ const [ax,ay]=armyPos(a); if(Math.hypot(ax-cx,ay-cy)<14){ nearArmy=a.id; break; } }
+    diag.push({pid,pixelProv,hit,sel:selectedProv,army:nearArmy,edit:!!editMode.on,
+               grant:!!grantMap.on,cede:!!cedeMap.on,lod:lodTier,box:[Math.round(cx),Math.round(cy)]});
+    if(selectedProv!==pid){ centerBad++; if(!sample) sample=[pid,selectedProv,'click']; }
+    // ② 图标四角（往往压在隔壁省上）：统计修复前后的命中率差异
+    for(const [ox,oy] of [[0.18,0.18],[0.82,0.18],[0.18,0.82],[0.82,0.82]]){
+      const px=x0+w*ox, py=y0+h*oy;
+      const [wx0,wy]=s2w(px,py); const wr=Math.floor(wy), wc=Math.floor(wrapX(wx0));
+      const under=(wr>=0&&wr<ROWS&&wc>=0&&wc<COLS)?provOf[wr*COLS+wc]:0;   // 旧逻辑：光标下那一格像素
+      offTot++;
+      if(under!==pid) oldBad++;
+      const now=cityHitAt(px,py);
+      if(now!==pid) offBad++;
+    }
+  }
+  selectedArmy=prevArmy; started=prevStarted;
+  selectedProv=prevSel; updateSelOverlay();        // 恢复原状，别让选中高亮影响后面的性能测量
+  // 收拾干净，别影响后面的城镇统计
+  for(const pid of cands) provinces[pid].fort=0;
+  _bldEpoch++;
+  return { cands, tot, centerBad, sample, offTot, oldBad, offBad, diag };
+`);
+if (!pickCity) {
+  console.log('  SKIP  没找到适合点选的城池位置');
+} else {
+  console.log(`  抽查 ${pickCity.tot} 座城的图标中心 + ${pickCity.offTot} 个图标内偏点`);
+  console.log(`  图标四角（常压在隔壁省上）旧逻辑点错 ${pickCity.oldBad}/${pickCity.offTot}，新逻辑点错 ${pickCity.offBad}/${pickCity.offTot}`);
+  check('点击城池图标正中，选中的就是这座城', pickCity.centerBad === 0, pickCity.sample);
+  if (pickCity.centerBad) console.log('  诊断: ' + JSON.stringify(pickCity.diag));
+  check('图标压在隔壁省上时，不再点到隔壁省', pickCity.offBad < pickCity.oldBad,
+    [pickCity.oldBad, pickCity.offBad]);
+}
+
 /* ---- 1~2 像素的碎岛已经在世界生成阶段被取消 ---- */
 const pruned = await p.eval(`
   let min=1e9, n2=0, alive=0;

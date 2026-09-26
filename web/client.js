@@ -1470,43 +1470,79 @@ function ensureTownTable(){
     p._tpx=best; if(best>=0) _townCount++;
   }
 }
-function drawTowns(){
+/* 一座省在屏幕上到底画哪个图标、画多大 —— 【绘图和点击拾取共用同一份几何】。
+   以前拾取只看「光标下那一格像素」，而图标有 18~32 像素宽、很多省本身只有十几像素，
+   于是经常出现「看着点的是这座城，实际选中的是隔壁省」→ 占错城、建错城防。
+   返回 null = 当前比例尺下根本不画，那也就不该点得到。 */
+function citySpriteFor(p,isCap,sc){
+  const fortLv=p.fort|0;
+  if(fortLv>0){
+    if(lodTier<1) return null;               // 中比例尺起画城防（它决定能不能通行）
+    const sp=fortSprite(fortLv,isCap);
+    return {sp,w:sp._w*sc,h:sp._h*sc,ax:sp._ax*sc,ay:sp._ay*sc,fort:1};
+  }
+  if(lodTier<2) return null;                 // 大比例尺才画普通城镇
   // 当前比例尺下最低要画到哪一级（国都不受限制）
   const minTier = cam.z>=TOWN_Z_VILL?0 : cam.z>=TOWN_Z_TOWN?1 : 2;
-  // 放得越大，图标也越大；不然放到底还是一堆看不清的小点
-  const sc=clamp(0.80+cam.z*0.075,1,1.8);
+  const dev=(p.tax||0)+(p.prod||0)+(p.man||0);
+  let tier=dev>=10?3:dev>=8?2:dev>=6?1:0;
+  if(isCap&&tier<2) tier=2;
+  if(!isCap&&tier<minTier) return null;
+  const box=(TOWN_BOX[tier]+(isCap?5:0))*sc;
+  return {sp:townSprite(tier,isCap),w:box,h:box,ax:box/2,ay:box/2,fort:0};
+}
+// 放得越大，图标也越大；不然放到底还是一堆看不清的小点
+function townScale(){ return clamp(0.80+cam.z*0.075,1,1.8); }
+// 城池图标的屏幕方框（右上角 + 宽高）：绘图与拾取都走这里，保证两者永远一致
+function cityBoxOnScreen(p,sc){
+  if(!p||!(p._tpx>=0)) return null;
+  const r=(p._tpx/COLS)|0, c=p._tpx%COLS;
+  const [sx,sy]=w2s(nearX(c+0.5),r+0.5);
+  if(sx<-40||sx>cw+40||sy<-40||sy>ch+40) return null;
+  const own=countries[p.owner]||countries[p.controller];
+  const isCap=!!(own&&own.alive&&own.capital===p.id);
+  const g=citySpriteFor(p,isCap,sc);
+  if(!g) return null;
+  return {g,sx,sy,x0:sx-g.ax,y0:sy-g.ay};
+}
+function drawTowns(){
+  const sc=townScale();
   let n=0;
   for(let i=1;i<provinces.length;i++){
     const p=provinces[i];
     if(!p||!(p._tpx>=0)) continue;
-    const r=(p._tpx/COLS)|0, c=p._tpx%COLS;
-    const wy=r+0.5;
-    // 取离相机最近的那一份；再按屏幕坐标裁剪（世界坐标跨接缝不连续）
-    const [sx,sy]=w2s(nearX(c+0.5),wy);
-    if(sx<-40||sx>cw+40||sy<-40||sy>ch+40) continue;
-    const own=countries[p.owner]||countries[p.controller];
-    const isCap=!!(own&&own.alive&&own.capital===p.id);
-    // 有城防 -> 画要塞模型（中比例尺就出现，因为它决定能不能通行）
-    const fortLv=p.fort|0;
-    if(fortLv>0){
-      const sp=fortSprite(fortLv,isCap);
-      const w=sp._w*sc, h=sp._h*sc;
-      tctx.drawImage(sp,sx-sp._ax*sc,sy-sp._ay*sc,w,h);
-      n++; _fortCount++; continue;
+    const b=cityBoxOnScreen(p,sc);
+    if(!b) continue;
+    const g=b.g;
+    tctx.drawImage(g.sp,b.x0,b.y0,g.w,g.h);
+    if(p.id===selectedProv){
+      // 选中的城描一圈金边：一眼看出「我点的是哪一座」，不会再看错
+      tctx.beginPath(); rectPath(tctx,b.x0-2.5,b.y0-2.5,g.w+5,g.h+5);
+      tctx.strokeStyle='rgba(255,214,110,.95)'; tctx.lineWidth=1.6; tctx.stroke();
     }
-    if(lodTier<2) continue;              // 中比例尺只画城防，不画普通城镇
-    const dev=(p.tax||0)+(p.prod||0)+(p.man||0);
-    let tier=dev>=10?3:dev>=8?2:dev>=6?1:0;
-    if(isCap&&tier<2) tier=2;
-    if(!isCap&&tier<minTier) continue;
-    const box=(TOWN_BOX[tier]+(isCap?5:0))*sc;
-    tctx.drawImage(townSprite(tier,isCap),sx-box/2,sy-box/2,box,box);
-    n++;
+    n++; if(g.fort) _fortCount++;
   }
   if(n){ _townCount=n; _townHasContent=true; }
 }
+/* 按城池图标拾取省份（光标落进图标方框内，取中心离光标最近的那一座）。
+   图标之间会互相压盖，所以「光标下那一格像素所属的省」只要自己也画了图标就优先它，
+   否则才用最近图标 —— 见 handleClick。 */
+function cityHitAt(sx,sy){
+  if(!provinces||provinces.length<2||lodTier<1) return 0;
+  const sc=townScale();
+  let best=0,bd=Infinity;
+  for(let i=1;i<provinces.length;i++){
+    const b=cityBoxOnScreen(provinces[i],sc);
+    if(!b) continue;
+    const g=b.g;
+    if(sx<b.x0-2||sx>b.x0+g.w+2||sy<b.y0-2||sy>b.y0+g.h+2) continue;
+    const d=Math.hypot(b.x0+g.w/2-sx,b.y0+g.h/2-sy);
+    if(d<bd){ bd=d; best=i; }
+  }
+  return best;
+}
 function ensureTownLayer(){
-  const key=cam.x.toFixed(2)+'|'+cam.y.toFixed(2)+'|'+cam.z.toFixed(4)+'|'+cw+'|'+ch+'|'+dpr+'|'+labelEpoch+'|'+lodTier+'|'+_bldEpoch;
+  const key=cam.x.toFixed(2)+'|'+cam.y.toFixed(2)+'|'+cam.z.toFixed(4)+'|'+cw+'|'+ch+'|'+dpr+'|'+labelEpoch+'|'+lodTier+'|'+_bldEpoch+'|'+selectedProv;
   if(key===townKey) return;
   townKey=key; _townCount=0; _fortCount=0; _townHasContent=false;
   const w=Math.max(1,Math.floor(cw*dpr)), h=Math.max(1,Math.floor(ch*dpr));
@@ -3723,6 +3759,14 @@ function handleClick(sx,sy){
   const c=Math.floor(wx), r=Math.floor(wy);
   let pid=0;
   if(c>=0&&c<COLS&&r>=0&&r<ROWS) pid=provOf[r*COLS+c];
+  /* 3) 城池图标拾取：光标底下的省没画城池图标时，改按图标方框选最近的城池。
+     图标（尤其要塞）比省还大，只看像素必然频繁点到隔壁省 —— 就是「占错城」。 */
+  const cityPid=cityHitAt(sx,sy);
+  if(cityPid&&cityPid!==pid){
+    const under=provinces[pid];
+    const underHasIcon=!!(under&&cityBoxOnScreen(under,townScale()));
+    if(!underHasIcon) pid=cityPid;
+  }
   if(pid){
     // 编辑器 / 割地 / 分封 三种地图模式优先拦下点击
     if(editMode.on){ editMapClick(pid); return; }

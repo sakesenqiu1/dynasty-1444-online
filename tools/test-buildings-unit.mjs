@@ -366,6 +366,82 @@ if (!e2e) {
     e2e.days >= 60 && e2e.days < 400, e2e.days);
 }
 
+/* ================= 8. 【核心】打下了一座要塞，不等于周围就通了 ================= */
+console.log('\n-- 8. 【核心】打下 F1 之后，旁边 F2 的控制区必须照旧生效 --');
+const multi = run(`
+  const A=countries.find(c=>c&&c.alive&&c.provList.length>12);
+  const B=countries.find(c=>c&&c.alive&&c.id!==A.id&&c.provList.length>12&&!atWar(A.id,c.id));
+  if(!A||!B) return null;
+  declareWar(B.id,A.id);
+  let F1=0,F2=0;
+  for(const pid of A.provList){
+    const p=provinces[pid];
+    if(!p||!p.pix.length||p.nbrs.length<3) continue;
+    if(!p.nbrs.every(q=>provinces[q].owner===A.id)) continue;
+    for(const q of p.nbrs){
+      const pq=provinces[q];
+      if(pq&&pq.pix.length&&pq.nbrs.length>=3&&pq.nbrs.every(r=>provinces[r].owner===A.id)){ F1=pid; F2=q; break; }
+    }
+    if(F1) break;
+  }
+  if(!F1||!F2) return null;
+  provinces[F1].fort=3; provinces[F2].fort=3;
+  const zocB1=zocMapFor(B.id);
+  const inZ1=new Set([F1]), inZ2=new Set([F2]);
+  for(const r of provinces[F1].nbrs) inZ1.add(r);
+  for(const r of provinces[F2].nbrs) inZ2.add(r);
+  const overlap=[...inZ1].filter(x=>inZ2.has(x));
+
+  const blockedBefore=(()=>{
+    let bad=0, tot=0;
+    for(const x of inZ2) for(const y of provinces[x].nbrs){
+      if(!inZ2.has(y)||x===y||y===F2) continue;
+      tot++; if(zocAllows(zocB1,x,y)) bad++;
+    }
+    return { bad, tot };
+  })();
+
+  // 模拟「打下 F1」：控制者换成 B
+  const savedC=provinces[F1].controller;
+  provinces[F1].controller=B.id;
+  const zocB2=zocMapFor(B.id);
+
+  const blockedAfter=(()=>{
+    let bad=0, tot=0, sample=null;
+    for(const x of inZ2) for(const y of provinces[x].nbrs){
+      if(!inZ2.has(y)||x===y||y===F2) continue;
+      tot++; if(zocAllows(zocB2,x,y)){ bad++; if(!sample) sample=[x,y]; }
+    }
+    return { bad, tot, sample };
+  })();
+  const overlapStill=(()=>{
+    let blocked=0, pairs=0;
+    for(const x of overlap) for(const y of provinces[x].nbrs){
+      if(!overlap.includes(y)||x===y) continue;
+      pairs++; if(!zocAllows(zocB2,x,y)) blocked++;
+    }
+    return { blocked, pairs, has:overlap.length };
+  })();
+  let enterF2=0;
+  for(const x of provinces[F2].nbrs) if(zocAllows(zocB2,x,F2)) enterF2++;
+
+  provinces[F1].controller=savedC;
+  provinces[F1].fort=0; provinces[F2].fort=0;
+  return { F1, F2, overlaps:overlap.length,
+           before:blockedBefore, after:blockedAfter, overlapStill, enterF2 };
+`);
+if (!multi) {
+  console.log('  SKIP  没找到相邻的两座要塞位置');
+} else {
+  console.log(`  要塞 F1=#${multi.F1}、F2=#${multi.F2}，两座控制区重叠 ${multi.overlaps} 个省`);
+  check('打下之前：F2 的控制区内部不能互穿', multi.before.bad === 0, multi.before);
+  check('【核心】打下 F1 之后，F2 的控制区照旧不能互穿（不是打一个就全通）',
+    multi.after.bad === 0, multi.after);
+  check('两座要塞重叠的省，打掉一座之后仍归另一座管',
+    multi.overlapStill.pairs === 0 || multi.overlapStill.blocked > 0, multi.overlapStill);
+  check('打下 F1 之后依然钻不进 F2', multi.enterF2 === 0, multi.enterF2);
+}
+
 /* ================= 7. 兵营：维护费减半 ================= */
 console.log('\n-- 7. 兵营减维护费 --');
 const up = run(`
@@ -415,6 +491,185 @@ const rt = run(`
 `);
 check('存档保留城防与兵营', rt.after.fort === 3 && rt.after.barracks === 1, rt.after);
 check('剧本保留城防与兵营', rt.fromScen.fort === 3 && rt.fromScen.barracks === 1, rt.fromScen);
+
+/* ================= 9. 【核心】控制区是墙，不是减速带 ================= */
+console.log('\n-- 9. 【核心】任意一条寻路结果都不许「路过」控制区 --');
+const wall = run(`
+  const A=countries.find(c=>c&&c.alive&&c.provList.length>12);
+  const B=countries.find(c=>c&&c.alive&&c.id!==A.id&&c.provList.length>12&&!atWar(A.id,c.id));
+  declareWar(B.id,A.id);
+  // 给 A 的一批内陆省塞满城防，控制区尽量连成片
+  let forts=0;
+  for(const pid of A.provList){
+    const p=provinces[pid];
+    if(!p||!p.pix.length||p.nbrs.length<3) continue;
+    if(!p.nbrs.every(q=>provinces[q].pix.length)) continue;
+    p.fort=4; if(++forts>=8) break;
+  }
+  const zoc=zocMapFor(B.id);
+  const covered=pid=>!!zoc.get(pid);
+  const isFort=pid=>{ const p=provinces[pid]; return !!(p&&p.fort&&p.controller&&p.controller!==B.id&&atWar(B.id,p.controller)); };
+  let checked=0, transit=0, intoFort=0, sample=null;
+  // 随机取 (起点,终点) 对，检查返回的路径
+  let seed=12345;
+  const rnd=()=>{ seed=(seed*1103515245+12345)&0x7fffffff; return seed/0x7fffffff; };
+  const list=[];
+  for(let i=1;i<provinces.length;i++) if(provinces[i].pix.length) list.push(i);
+  for(let t=0;t<600;t++){
+    const from=list[(rnd()*list.length)|0], to=list[(rnd()*list.length)|0];
+    const path=findPath(from,to,B.id);
+    if(!path) continue;
+    checked++;
+    for(let k=0;k<path.length;k++){
+      if(intoFort===0&&isFort(path[k])){ intoFort++; sample=[from,to,path.slice()]; }
+      // 控制区只能作为**最后一步**踏入：中途出现在路径里 = 穿墙
+      if(covered(path[k])&&k!==path.length-1){ transit++; if(!sample) sample=[from,to,path.slice()]; }
+    }
+  }
+  const res={ forts, checked, transit, intoFort, sample };
+  for(const pid of A.provList) if(provinces[pid]) provinces[pid].fort=0;
+  return res;
+`);
+console.log(`  8 座要塞的控制区，抽查 ${wall.checked} 条可达路径`);
+check('【核心】没有任何一条路径中途穿过控制区（打下要塞≠旁边就通）', wall.transit === 0, wall.sample);
+check('【核心】没有任何一条路径走进要塞那一格', wall.intoFort === 0, wall.sample);
+
+/* ================= 10. 【核心】行军每一步都复核控制区 ================= */
+console.log('\n-- 10. 【核心】路径是城防修好之前算好的，也必须停在墙外 --');
+const march = run(`
+  const A=countries.find(c=>c&&c.alive&&c.provList.length>12);
+  const B=countries.find(c=>c&&c.alive&&c.id!==A.id&&c.provList.length>8&&!atWar(A.id,c.id));
+  declareWar(B.id,A.id);
+  // 找一座要塞 F：从 B 的地盘能走到 F 另一侧的省（中间必须经过 F 的外圈）
+  let F=0, start=0, dst=0;
+  for(const pid of A.provList){
+    const p=provinces[pid];
+    if(!p||!p.pix.length||p.nbrs.length<3) continue;
+    const ring=p.nbrs.filter(r=>provinces[r].pix.length);
+    if(ring.length<2) continue;
+    p.fort=0;
+    // 找一对省：起点在 F 的一侧、终点在另一侧，且路必须穿过 F 或它的外圈
+    for(const r of ring){
+      const behind=provinces[r].nbrs.find(q=>q!==pid&&provinces[q].pix.length&&!ring.includes(q));
+      if(!behind) continue;
+      for(let s=1;s<provinces.length;s++){
+        const sp=provinces[s];
+        if(!sp.pix.length||s===pid||ring.includes(s)||s===behind) continue;
+        if(sp.controller===B.id||sp.owner===B.id) continue;
+        const via=findPath(s,behind,B.id);
+        if(via&&via.includes(pid)){ start=s; dst=behind; F=pid; break; }
+      }
+      if(F) break;
+    }
+    if(F) break;
+  }
+  if(!F) return null;
+  const p=provinces[F];
+  // ① 没城防时先算好一条「穿过要塞那一格」的旧路径
+  const stale=findPath(start,dst,B.id);
+  if(!stale) return null;
+  // ② 城防落成（路径已经握在手里了 —— 模拟 AI 的路径 / 你在敌人修城防之前下的令）
+  p.fort=4;
+  armies=armies.filter(a=>a.owner!==B.id);
+  const a={id:92001,owner:B.id,prov:start,str:20000,path:stale.slice(),prog:0};
+  armies.push(a);
+  const seen=[], illegal=[];
+  let halted=0, haltedAt=0, sieged=false, captured=false, capDay=0;
+  for(let d=0;d<160;d++){
+    const before=a.prov;
+    tickDay();
+    if(a.prov!==before){
+      const q=provinces[a.prov];
+      // 军队实际迈出的每一步，都必须过得了当时的控制区
+      const ok=zocAllows(zocMapFor(a.owner),before,a.prov,true);
+      if(!ok) illegal.push([before,a.prov]);
+      seen.push(a.prov);
+    }
+    if(p.siege>0) sieged=true;
+    if(p.controller===B.id){ if(!captured){captured=true;capDay=d+1;} }
+    if(halted===0&&a.path.length===0){ halted=d+1; haltedAt=a.prov; }
+    if(a.prov===dst) break;
+  }
+  const res={ F, name:p.name, start, dst, halted, haltedAt,
+              reached:a.prov===dst, illegal:illegal.length, illegalSample:illegal[0]||null,
+              adjacentToFort:provinces[haltedAt||a.prov].nbrs.includes(F),
+              final:a.prov, sieged, captured, capDay, siege:provinces[F].siege };
+  armies=armies.filter(x=>x.id!==92001);
+  p.fort=0; p.controller=p.owner; p.siege=0;
+  return res;
+`);
+if (!march) {
+  console.log('  SKIP  没找到合适的「必须穿墙」的位置');
+} else {
+  console.log(`  要塞 ${march.name}：军队带着旧路径出发，第 ${march.halted} 天停在 #${march.haltedAt}` +
+    (march.captured ? `，第 ${march.capDay} 天攻破` : ''));
+  check('【核心】旧路径不能穿墙：军队没有抵达墙对面的目标省', march.reached === false, march);
+  check('【核心】行军途中没有任何一步违反控制区规则', march.illegal === 0, march.illegalSample);
+  check('撞墙后停到要塞外圈上（就地开始围攻，不是卡在半路）', march.adjacentToFort === true, march);
+  check('【核心】围攻照常开始并最终攻破（打不下要塞才是死局）', march.sieged === true, march);
+}
+
+/* ================= 11. 城池图标锚点必须落在自己的省内 ================= */
+console.log('\n-- 11. 城池图标锚点（城市画在谁的领土上） --');
+const anchor = run(`
+  // 复刻 client.js 里 ensureTownTable 的锚点算法：取离本省质心最近的本省像素
+  let ok=0, bad=0, badSample=null, noAnchor=0, farSample=null, maxD=0;
+  for(let i=1;i<provinces.length;i++){
+    const p=provinces[i];
+    if(!p||!p.pix||!p.pix.length) continue;
+    let best=-1, bd=Infinity;
+    for(const px of p.pix){
+      const r=(px/COLS)|0, c=px%COLS;
+      const dx=c+0.5-p.cx, dy=r+0.5-p.cy, d=dx*dx+dy*dy;
+      if(d<bd){ bd=d; best=px; }
+    }
+    if(best<0){ noAnchor++; continue; }
+    // ① 锚点必须属于本省（否则城池会画到隔壁省头上 —— 就是「占错城」）
+    if(provOf[best]===p.id) ok++; else { bad++; if(!badSample) badSample=[p.id,provOf[best],p.name]; }
+    // ② 锚点离质心不该太远（太远说明画到了飞地/小岛上）
+    const d=Math.sqrt(bd);
+    if(d>maxD) maxD=d;
+    if(d>12&&!farSample) farSample=[p.id,p.name,+d.toFixed(1)];
+  }
+  return { ok, bad, badSample, noAnchor, maxD:+maxD.toFixed(1), farSample, total:ok+bad };
+`);
+console.log(`  抽查 ${anchor.total} 个省：锚点落在本省 ${anchor.ok} 个，越界 ${anchor.bad} 个，最远距质心 ${anchor.maxD} 像素`);
+check('【核心】每个省的城池图标锚点都落在本省领土内（不会画到隔壁省）', anchor.bad === 0, anchor.badSample);
+check('每个有领土的省都有城池锚点', anchor.noAnchor === 0, anchor.noAnchor);
+
+/* ================= 12. 两座要塞相邻时，围的是最近的那一座 ================= */
+console.log('\n-- 12. 军队夹在两座要塞中间时，围攻目标 = 最近的那一座 --');
+const pick = run(`
+  const A=countries.find(c=>c&&c.alive&&c.provList.length>12);
+  const B=countries.find(c=>c&&c.alive&&c.id!==A.id&&c.provList.length>8&&!atWar(A.id,c.id));
+  declareWar(B.id,A.id);
+  let X=0,F1=0,F2=0;
+  for(const pid of A.provList){
+    const p=provinces[pid];
+    if(!p||!p.pix.length||p.nbrs.length<3) continue;
+    const fs=p.nbrs.filter(q=>provinces[q].pix.length&&provinces[q].controller===A.id&&provinces[q].nbrs.length>=2);
+    if(fs.length>=2){ X=pid; F1=fs[0]; F2=fs[1]; break; }
+  }
+  if(!X) return null;
+  provinces[F1].fort=5; provinces[F2].fort=1;
+  const cx=provinces[X].cx, cy=provinces[X].cy;
+  const d2=f=>{ const q=provinces[f]; let dx=q.cx-cx, dy=q.cy-cy;
+    if(dx>COLS/2) dx-=COLS; else if(dx<-COLS/2) dx+=COLS; return dx*dx+dy*dy; };
+  const near=d2(F1)<=d2(F2)?F1:F2, far=near===F1?F2:F1;
+  const byDist=siegeTargetFor(X,B.id,cx,cy);
+  const byLevel=siegeTargetFor(X,B.id);
+  const res={ X, F1, F2, near, far, byDist, byLevel,
+              distNear:+Math.sqrt(d2(near)).toFixed(1), distFar:+Math.sqrt(d2(far)).toFixed(1) };
+  provinces[F1].fort=0; provinces[F2].fort=0;
+  return res;
+`);
+if (!pick) {
+  console.log('  SKIP  没找到夹在两座要塞中间的省');
+} else {
+  console.log(`  省 #${pick.X} 夹在 #${pick.F1}(Lv5, ${pick.distNear}px) 与 #${pick.F2}(Lv1, ${pick.distFar}px) 之间`);
+  check('【核心】围攻的是离军队最近的那座要塞（不是等级最高的那座）', pick.byDist === pick.near, pick);
+  check('不给坐标时退回「等级最高」的确定性选择（AI/旧调用不受影响）', pick.byLevel === pick.F1, pick);
+}
 
 console.log(`\n=== result: ${failures === 0 ? 'ALL PASS' : failures + ' FAILED'} ===\n`);
 process.exit(failures ? 1 : 0);
