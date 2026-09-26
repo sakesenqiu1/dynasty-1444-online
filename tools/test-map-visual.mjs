@@ -23,6 +23,9 @@ const CDP_PORT = 9351;
 const EDGE = process.env.GS_EDGE || 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
 const WORLD_READY = "typeof countries!=='undefined' && countries.length>100";
 const SHOTS = process.env.GS_SHOTS || join(root, '_shots');
+// 设了 GS_URL 就直接测已部署的站点，不再本地起服务
+const LIVE_URL = process.env.GS_URL || '';
+const TARGET = LIVE_URL || `http://127.0.0.1:${PORT}${BASE}/`;
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 let failures = 0;
@@ -32,7 +35,7 @@ const log = (s) => console.log(`[${((Date.now() - t0) / 1000).toFixed(1)}s] ${s}
 
 mkdirSync(SHOTS, { recursive: true });
 
-const srv = spawn(process.execPath, [join(root, 'srv', 'server.js')], {
+const srv = LIVE_URL ? null : spawn(process.execPath, [join(root, 'srv', 'server.js')], {
   env: { ...process.env, PORT: String(PORT), HOST: '127.0.0.1', BASE },
   stdio: 'ignore',
 });
@@ -50,17 +53,17 @@ for (let i = 0; i < 80; i++) {
   try { const r = await fetch(`${origin}/json/version`); if (r.ok) { ver = await r.json(); break; } } catch (e) {}
   await sleep(400);
 }
-if (!ver) { console.error('Edge CDP not ready'); srv.kill(); edge.kill(); process.exit(1); }
+if (!ver) { console.error('Edge CDP not ready'); if (srv) srv.kill(); edge.kill(); process.exit(1); }
 log('CDP ready: ' + ver.Browser);
 
-/* 先把 HTTP 服务等起来，否则页面根本加载不出来，报错会指向 CDP 而不是服务端 */
+/* 先把服务等起来，否则页面根本加载不出来，报错会指向 CDP 而不是服务端 */
 let up = false;
 for (let i = 0; i < 60; i++) {
-  try { const r = await fetch(`http://127.0.0.1:${PORT}${BASE}/`); if (r.ok) { up = true; break; } } catch (e) {}
+  try { const r = await fetch(TARGET); if (r.ok) { up = true; break; } } catch (e) {}
   await sleep(250);
 }
-if (!up) { console.error(`本地服务 http://127.0.0.1:${PORT}${BASE}/ 没起来`); srv.kill(); edge.kill(); process.exit(1); }
-log('本地服务已就绪');
+if (!up) { console.error(`${TARGET} 打不开`); if (srv) srv.kill(); edge.kill(); process.exit(1); }
+log('目标站点已就绪: ' + TARGET);
 
 class Page {
   constructor() { this.id = 0; this.pending = new Map(); this.errs = []; }
@@ -129,7 +132,7 @@ class Page {
 
 console.log('\n=== 地图外观测试 ===\n');
 
-const p = await Page.open(`http://127.0.0.1:${PORT}${BASE}/`);
+const p = await Page.open(TARGET);
 try {
   await p.waitFor(WORLD_READY, 90000, 'world build');
   await p.waitFor("document.getElementById('loading').classList.contains('hidden')", 60000, 'loading hidden');
@@ -152,7 +155,7 @@ try {
     catch (e2) { console.error('  ' + k.padEnd(14) + ': <eval 失败> ' + e2.message); }
   }
   console.error('  页面报错       : ' + (p.errs.slice(0, 8).join(' || ') || '(无)'));
-  p.close(); srv.kill(); edge.kill();
+  p.close(); if (srv) srv.kill(); edge.kill();
   await sleep(500);
   try { rmSync(profile, { recursive: true, force: true }); } catch (e3) {}
   process.exit(1);
@@ -310,7 +313,7 @@ check('页面无 JS 错误', errs.length === 0, errs.slice(0, 5).join(' || '));
 console.log(`\n=== result: ${failures === 0 ? 'ALL PASS' : failures + ' FAILED'} ===`);
 console.log('截图目录: ' + SHOTS + '\n');
 
-p.close(); srv.kill(); edge.kill();
+p.close(); if (srv) srv.kill(); edge.kill();
 await sleep(600);
 try { rmSync(profile, { recursive: true, force: true }); } catch (e) {}
 process.exit(failures ? 1 : 0);
