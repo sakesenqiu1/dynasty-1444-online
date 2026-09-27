@@ -2982,12 +2982,6 @@ function infoTab(){
           <div><button class="act" style="background:#3a1c18;border-color:#a05040;color:#f0b0a0" data-act="assault" data-v="${a.id}" data-p="${tg.id}">⚔ 开进 ${tg.name} 攻城</button></div>`;
       }
     }
-    /* 围城中的军队：只能原路撤围（进城时记下的那一格），给一个明确的按钮 */
-    if(!a.isNavy&&a.owner===player){
-      const ret=cityRetreatFor(a);
-      if(ret) h+=`<div class="row"><span>围城中</span><span class="hint">只能原路撤围（退回 ${provinces[ret]?provinces[ret].name:'进城前那一格'}），不能从别的方向绕出去</span></div>
-        <div><button class="act" data-act="retreat" data-v="${a.id}">↩ 撤围（原路返回 ${provinces[ret]?provinces[ret].name:''}）</button></div>`;
-    }
     if(a.owner===player) h+=`<div><button class="act danger" data-act="disband" data-v="${a.id}">解散${a.isNavy?'舰队':'军团'}</button></div>`;
     h+=`<p class="hint">${a.isNavy?'选中后点击地图任意海岸省份下达航行令，右键取消。':'选中后点击地图任意省份下达行军令，右键取消。'}</p><div class="sep"></div>`;
   }
@@ -3261,7 +3255,6 @@ document.addEventListener('click',e=>{
     case 'recruit-navy': doRecruitNavy(+v); break;
     case 'disband': if(MP.online){ mpCmd({c:'disband',army:+v}); break; } armies=armies.filter(a=>a.id!==+v); if(selectedArmy===+v)selectedArmy=0; refreshPanel(); break;
     case 'assault': doAssault(+v,+el.dataset.p); break;
-    case 'retreat': doRetreat(+v); break;
     case 'declare': doDeclare(+v); break;
     case 'found-vassal': {
       const p=provinces[+v];
@@ -3458,18 +3451,6 @@ function doAssault(armyId,pid){
   const path=findPath(a.prov,pid,a.owner,cityRetreatFor(a));
   if(path&&path.length){ a.path=path; a.prog=0; a.dstProv=pid; }
   else pushLog(`${p.name} 打不通：先解决挡路的城防`,'war');
-  refreshPanel();
-}
-/* 撤围：原路退回到进城前那一格（围城中的军队只能这么走） */
-function doRetreat(armyId){
-  const a=armies.find(x=>x.id===armyId);
-  if(!a) return;
-  const ret=cityRetreatFor(a);
-  if(!ret) return;
-  if(MP.online) return mpCmd({c:'path',army:a.id,to:ret});
-  const path=findPath(a.prov,ret,a.owner,ret);
-  if(path&&path.length){ a.path=path; a.prog=0; }
-  pushLog(`撤围：${provinces[a.prov]?provinces[a.prov].name:''} 的围城部队原路退回 ${provinces[ret]?provinces[ret].name:''}`,'war');
   refreshPanel();
 }
 function doRecruitNavy(pid){
