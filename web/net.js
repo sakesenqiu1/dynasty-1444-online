@@ -537,7 +537,7 @@ function mpApplyArmies(changed, removed) {
     let a = byId.get(id);
     if (!a) {
       // 只可能是完整行（新军队一定是长行）
-      a = { id, owner, prov, str, path: [], prog, progSrv: prog, progPrev: prog, progAt: now };
+      a = { id, owner, prov, str, path: [], prog, progSrv: prog, progPrev: prog, progAt: now, cameFrom: 0 };
       byId.set(id, a);
     }
     const provChanged = a.prov !== prov;
@@ -554,6 +554,8 @@ function mpApplyArmies(changed, removed) {
     a.isNavy = isNavy ? 1 : 0;
     a.attrit = attrit || 0;
     a.dstProv = dst || 0;
+    // row[11] = 围城中的来路（0 = 没有）。客户端据此只允许原路撤围，和服务端保持一致。
+    if (row.length > 11) a.cameFrom = row[11] || 0;
 
     const ni = navIdx || 0;
     if (a.navIdxSrv === undefined || provChanged) { a.navIdx = ni; a.navIdxPrev = ni; a.navIdxF = ni; }

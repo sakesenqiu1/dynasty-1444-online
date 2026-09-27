@@ -258,11 +258,13 @@ class Room {
           if (!np) throw new Error(p2.coastPix.length ? '无法找到通往该省的海路' : '目标省没有海岸线，无法派遣舰队');
           a.navPath = np; a.navIdx = 0; a.dstProv = pid; a.path = []; a.prog = 0;
         } else {
-          const pathArr = core.findPath(a.prov, pid, a.owner);
+          // 围城中的军队只能原路撤出（见 core.cityRetreatFor）
+          const ret = core.cityRetreatFor(a);
+          const pathArr = core.findPath(a.prov, pid, a.owner, ret);
           // 拿不到路时再算一遍「不管城防」的版本，好区分是城防挡的还是真没路
           if (!pathArr) throw new Error(core.findPath(a.prov, pid, 0)
             ? '打不通：路上有敌方城防（城防外圈禁止敌军横穿），必须先把它攻下来'
-            : '无法找到通往该省的陆路');
+            : (ret ? '围城中的军队只能原路撤围（回到进城前那一格）' : '无法找到通往该省的陆路'));
           a.path = pathArr; a.prog = 0;
         }
         if (!this.forceArmy) this.forceArmy = new Set();
@@ -714,23 +716,25 @@ class Room {
       const str = Math.round(a.str), prog = Math.round(a.prog * 10) / 10;
       const isNavy = a.isNavy ? 1 : 0, navIdx = a.navIdx || 0, attrit = Math.round(a.attrit || 0);
       const dst = a.path && a.path.length ? a.path[a.path.length - 1] : 0;
+      // 围城中的来路：客户端据此只允许原路撤围（不在行里发就是没变）
+      const retreat = a.cameFrom || 0;
       let o = army.get(a.id);
       const isNew = o === undefined;
       if (isNew) {
-        o = { owner: 0, prov: 0, str: 0, prog: 0, isNavy: 0, navIdx: 0, attrit: 0, pathSig: '', navRef: null, dst: -1, gen: 0 };
+        o = { owner: 0, prov: 0, str: 0, prog: 0, isNavy: 0, navIdx: 0, attrit: 0, pathSig: '', navRef: null, dst: -1, retreat: 0, gen: 0 };
         army.set(a.id, o);
       }
       const forcedThis = !!(forced && forced.has(a.id));
       const changed = forceFull || forcedThis || isNew || o.owner !== a.owner || o.prov !== a.prov ||
         o.str !== str || o.prog !== prog || o.isNavy !== isNavy ||
         o.navIdx !== navIdx || o.attrit !== attrit ||
-        o.pathSig !== pathSig || o.navRef !== navRef || o.dst !== dst;
+        o.pathSig !== pathSig || o.navRef !== navRef || o.dst !== dst || o.retreat !== retreat;
       if (changed) {
         /* 绝大多数帧里军队只是"位置/兵力/行军进度"变了，路径等字段没动。
            这种情况只发 5 个字段（客户端按行长度区分），能省掉一多半字节。 */
         const shortOk = !isNew && !forcedThis && !forceFull &&
           o.isNavy === isNavy && o.navIdx === navIdx && o.attrit === attrit &&
-          o.pathSig === pathSig && o.navRef === navRef && o.dst === dst;
+          o.pathSig === pathSig && o.navRef === navRef && o.dst === dst && o.retreat === retreat;
         if (shortOk) {
           ar.push([a.id, a.owner, a.prov, str, prog]);
         } else {
@@ -740,12 +744,12 @@ class Room {
              以前抵达时发 null，客户端以为没变化，旧航路一直留着；
              而服务端又把 navIdx 归零，于是舰队被画在航路的第 0 个点 = 出发点。 */
           const navOut = (forceFull || isNew || o.navRef !== navRef || forcedThis) ? (a.navPath || []).slice() : null;
-          ar.push([a.id, a.owner, a.prov, str, prog, isNavy, navIdx, attrit, pathOut, navOut, dst]);
+          ar.push([a.id, a.owner, a.prov, str, prog, isNavy, navIdx, attrit, pathOut, navOut, dst, retreat]);
         }
       }
       o.owner = a.owner; o.prov = a.prov; o.str = str; o.prog = prog;
       o.isNavy = isNavy; o.navIdx = navIdx; o.attrit = attrit;
-      o.pathSig = pathSig; o.navRef = navRef; o.dst = dst; o.gen = gen;
+      o.pathSig = pathSig; o.navRef = navRef; o.dst = dst; o.retreat = retreat; o.gen = gen;
     }
     const stale = [];
     army.forEach((o, id) => { if (o.gen !== gen) stale.push(id); });

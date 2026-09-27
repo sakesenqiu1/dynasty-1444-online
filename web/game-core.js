@@ -821,6 +821,14 @@ function hostileFortAt(pid,mover){
   if(!atWar(mover,holder)) return 0;
   return pid;
 }
+/* 围城中的军队要往哪儿撤：站在敌方要塞城市格上时，只允许原路退回进城前那一格。
+   军队进城时会把来路记在 a.cameFrom（见 tickDay 的行军循环）。
+   返回 0 = 不受这条限制（不在敌方城市格上、或没有来路记录：读档/剧本放置的军队）。 */
+function cityRetreatFor(a){
+  if(!a||!a.cameFrom) return 0;
+  if(!hostileFortAt(a.prov,a.owner)) return 0;
+  return a.cameFrom;
+}
 /* 站在这个省上，它周围有哪些敌方要塞（只用于地图提示/测试，不再用它决定打谁） */
 function hostileFortsAt(pid,mover){
   const p=provinces[pid];
@@ -838,7 +846,7 @@ function hostileFortsAt(pid,mover){
   return out;
 }
 
-function findPath(from,to,mover){
+function findPath(from,to,mover,exitTo){
   if(from===to) return [];
   const zoc=zocMapFor(mover);
   const prev=new Int32Array(provinces.length).fill(-1); prev[from]=from;
@@ -846,6 +854,9 @@ function findPath(from,to,mover){
   while(h<q.length){
     const u=q[h++];
     for(const v of provinces[u].nbrs){
+      /* exitTo：围城中的军队必须原路撤出（只能先回到进城前那一格），
+         这样就没法"进城 → 从另一侧外圈出去"来穿过要塞。 */
+      if(exitTo&&u===from&&v!==exitTo) continue;
       if(prev[v]===-1&&zocAllows(zoc,u,v,to)){
         prev[v]=u;
         if(v===to){ const path=[]; let x=to; while(x!==from){path.push(x);x=prev[x];} return path.reverse(); }
@@ -965,13 +976,14 @@ function bfsTo(start,pred){
   return null;
 }
 /* 去打开路的那座要塞：先无视控制区找出最近的敌方城市格，再用正规寻路走进去。
-   城市格只允许作为行军终点踏入 —— 正好就是「到达城市所在地块，然后开始攻城」。 */
-function routeToBesiege(start,owner){
+   城市格只允许作为行军终点踏入 —— 正好就是「到达城市所在地块，然后开始攻城」。
+   exitTo 给定时（围城中的军队）只能沿来路撤出。 */
+function routeToBesiege(start,owner,exitTo){
   const way=bfsTo(start,q=>!!hostileFortAt(q.id,owner),0);
   if(!way||!way.length) return null;
   const dest=way[way.length-1];
   if(dest===start) return null;                 // 已经站在城里了（围城中）
-  return findPath(start,dest,owner);
+  return findPath(start,dest,owner,exitTo);
 }
 // 阵营本土距离（多源BFS：本国+附庸+宗主的全部省份为源，深度上限12跳）：
 // 用于远征后勤损耗与孤岛困军检测；不可达（孤岛/海外）返回 Map 中无该省
@@ -1186,15 +1198,20 @@ function tickDay(){
         const nxt=a.path[0];
         const last=a.path[a.path.length-1];      // 这一走的真正终点，控制区规则要看它
         const zoc=zocOfDay(a.owner);
+        const ret=cityRetreatFor(a);             // 围城中：只准原路撤回进城前那一格
         /* 每一步都重新校验控制区 —— 这是「打下要塞不等于旁边就通了」的关键：
            路径可能是城防出现之前算好的（AI 的路径、或者你在敌人修好城防之前下的令），
            绝不能凭一条旧路径穿墙。 */
-        if(nxt!==undefined&&zocAllows(zoc,a.prov,nxt,last)){
+        if(nxt!==undefined&&(!ret||nxt===ret)&&zocAllows(zoc,a.prov,nxt,last)){
+          const before=a.prov;
           a.prov=a.path.shift();
+          // 进城（踏上敌方要塞城市格）时记住来路，撤围必须沿着它退回去
+          a.cameFrom=hostileFortAt(a.prov,a.owner)?before:0;
         } else {
           /* 撞墙了。AI 改道去打挡住它的那座城（军队要开到城市所在地块才开打）；
              玩家的军队原地停下并收到一句提示（让他自己决定打还是绕）。 */
           a.path=[];
+          if(ret) continue;                      // 围城中的军队：原地继续围，不许从别处绕出去
           const bf=blockingFortFor(zoc,a.prov,nxt);
           if(!isHuman(a.owner)&&bf){
             const r=routeToBesiege(a.prov,a.owner);
@@ -1220,6 +1237,8 @@ function tickDay(){
     if(p.owner===a.owner) continue;
     if(p.controller===a.owner) continue;
     if(atWar(a.owner,p.owner)||atWar(a.owner,p.controller)) continue;
+    // 正在围城的军队不自动回家：它只能原路撤围（见 cityRetreatFor）
+    if(cityRetreatFor(a)) continue;
     const homePath=bfsHome(a.prov,a.owner);
     if(homePath){ a.path=homePath; a.prog=0; }
   }
@@ -1883,7 +1902,7 @@ function aiMonthly(){
         if(onEnemy&&(p.controller===c||overlordOf(p.controller)===c)){
           if(cands.length){
             const tgt=cands[idle.indexOf(a)%cands.length];
-            const path=findPath(a.prov,tgt,a.owner);
+            const path=findPath(a.prov,tgt,a.owner,cityRetreatFor(a));
             if(path&&path.length) a.path=path;
           }
           continue;
@@ -1891,22 +1910,22 @@ function aiMonthly(){
         if(!onEnemy){
           // 本土被入侵 → 优先回防迎击
           if(invProv&&(p.owner===c||overlordOf(p.owner)===c)){
-            const path=findPath(a.prov,invProv,a.owner);
+            const path=findPath(a.prov,invProv,a.owner,cityRetreatFor(a));
             if(path&&path.length){ a.path=path; continue; }
           }
           /* 先用「不管控制区」的 BFS 挑目标，再用正规寻路走过去：
              这样路一定是合法路线；走不通说明被敌方要塞挡住了。 */
           const way=bfsTo(a.prov,q=>q.owner===foe||q.controller===foe,0);
-          const path=way&&way.length?findPath(a.prov,way[way.length-1],a.owner):null;
+          const path=way&&way.length?findPath(a.prov,way[way.length-1],a.owner,cityRetreatFor(a)):null;
           if(path&&path.length) a.path=path;
           else {
             // 陆路被城防挡死 → 不绕路、不穿墙，改为开过去打那座要塞（攻下才能通行）
-            const siegePath=routeToBesiege(a.prov,a.owner);
+            const siegePath=routeToBesiege(a.prov,a.owner,cityRetreatFor(a));
             if(siegePath) a.path=siegePath;
           }
         }
       } else if(a.prov!==cc.capital){
-        const path=findPath(a.prov,cc.capital,a.owner);
+        const path=findPath(a.prov,cc.capital,a.owner,cityRetreatFor(a));
         if(path) a.path=path;
       }
     }
@@ -2632,7 +2651,7 @@ function makeSaveData(){
     ct:countries.slice(1).map(c=>c?(c.featId==='CUSTOM'
       ?{a:c.alive?1:0,g:Math.round(c.gold*10)/10,mp:Math.round(c.mp),r:c.ruler,ov:c.overlord||0,al:(c.allies||[]).slice(),n:c.name,col:c.color,cap:c.capital,sj:c.subject||0}
       :{a:c.alive?1:0,g:Math.round(c.gold*10)/10,mp:Math.round(c.mp),r:c.ruler,ov:c.overlord||0,al:(c.allies||[]).slice(),sj:c.subject||0}):null),
-    arm:armies.map(a=>({i:a.id,o:a.owner,p:a.prov,s:Math.round(a.str),n:a.isNavy?1:0})),
+    arm:armies.map(a=>({i:a.id,o:a.owner,p:a.prov,s:Math.round(a.str),n:a.isNavy?1:0,q:a.cameFrom||0})),
     rec:recruits.map(r=>({i:r.id,o:r.owner,p:r.prov,s:r.str,n:r.isNavy?1:0,d:r.days,t:r.total,st:r.start})),
     nextRecruit,
     wars:wars.map(w=>({...w})), truces:{...truces}, nextArmy,
@@ -2674,7 +2693,7 @@ function applySaveData(d){
   armies=(d.arm||[]).map(a=>{
     const id=(a.i!==undefined&&a.i>0)?a.i:nextArmy++;
     if(id>=nextArmy) nextArmy=id+1;
-    return {id,owner:a.o,prov:a.p,str:a.s,path:[],prog:0,isNavy:a.n?1:0};
+    return {id,owner:a.o,prov:a.p,str:a.s,path:[],prog:0,isNavy:a.n?1:0,cameFrom:a.q||0};
   });
   nextRecruit=d.nextRecruit||1;
   recruits=(d.rec||[]).map(r=>{
@@ -2742,7 +2761,7 @@ if(typeof module!=='undefined'&&module.exports){
     FORT_MAX,FORT_GARRISON,FORT_SIEGE_FACTOR,FORT_MAX_ADV,FORT_LUCK,FORT_MIN_DAYS,FORT_MIN_FRAC,
     BARRACKS_COST,BARRACKS_DAYS,FORT_COST,FORT_DAYS,BUILD_NAMES,
     ensureProvinceBuildings,garrisonOf,buildCost,buildDays,buildBuilding,demolishBuilding,tickBuild,
-    zocMapFor,zocAllows,hostileFortAt,hostileFortsAt,blockingFortFor,routeToBesiege,siegeDailyProgress,
+    zocMapFor,zocAllows,hostileFortAt,hostileFortsAt,blockingFortFor,routeToBesiege,cityRetreatFor,siegeDailyProgress,
     ensureProvHeat,addHeat,decayHeat,aiBuild,provHeat,
     tickDay,advanceDay,mergeArmies,resolveBattles,resolveSieges,monthlyTick,economy,aiMonthly,
     declareWar,makePeace,transferProvince,checkDeath,vassalize,releaseStaleOccupations,

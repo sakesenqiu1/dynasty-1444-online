@@ -368,6 +368,53 @@ if (!arrows) {
   check('选中军队有路径时会让画面持续刷新（否则箭头会冻住）', arrows.anim === true, arrows);
 }
 
+/* ---- 海军航路：蓝箭头 ---- */
+const navyArrows = await p.eval(`
+  ${VIEW}
+  const coast=[];
+  for(let i=1;i<provinces.length&&coast.length<14;i++){
+    const q=provinces[i];
+    if(q&&q.coastPix&&q.coastPix.length&&q.pix.length&&q.owner) coast.push(i);
+  }
+  if(coast.length<2) return null;
+  let nav=null, from=0, to=0;
+  for(const a1 of coast){
+    for(const b1 of coast){
+      if(a1===b1) continue;
+      const np=findNavalPath(a1,b1);
+      if(np&&np.length>6){ nav=np; from=a1; to=b1; break; }
+    }
+    if(nav) break;
+  }
+  if(!nav) return null;
+  const prevPlayer=player, prevSel=selectedArmy, prevStarted=started;
+  const a={id:97001,owner:player||1,prov:from,str:4000,path:[],prog:0,isNavy:1,navPath:nav,navIdx:0,navIdxF:0,dstProv:to};
+  armies.push(a);
+  player=a.owner; selectedArmy=a.id; started=true;
+  __view(4.0, provinces[from].cx, provinces[from].cy);
+  const snap=()=>{ _frameKey=''; render(performance.now()); return ctx.getImageData(0,0,mapCv.width,mapCv.height).data; };
+  const withP=snap();
+  const anim=marchAnimOn();
+  a.navPath=null; a.dstProv=0;
+  const withoutP=snap();
+  a.navPath=nav;
+  let bluePx=0;
+  for(let i=0;i<withP.length;i+=4){
+    if(withP[i]<150&&withP[i+1]>140&&withP[i+2]>200&&
+       (Math.abs(withP[i]-withoutP[i])+Math.abs(withP[i+1]-withoutP[i+1])+Math.abs(withP[i+2]-withoutP[i+2]))>40) bluePx++;
+  }
+  armies=armies.filter(x=>x.id!==97001);
+  player=prevPlayer; selectedArmy=prevSel; started=prevStarted;
+  return { bluePx, anim, from, to, len:nav.length };
+`);
+if (!navyArrows) {
+  console.log('  SKIP  没找到可用的海路');
+} else {
+  console.log(`  海军航路蓝箭头：只有画了航路才会出现的蓝色像素 ${navyArrows.bluePx} 个（航路 ${navyArrows.len} 个像素点）`);
+  check('海军航路上画出了蓝色箭头', navyArrows.bluePx > 80, navyArrows);
+  check('海军航路的箭头也会动（画面持续刷新）', navyArrows.anim === true, navyArrows);
+}
+
 /* ---- 点城市：看到的那座城 = 点到的那座城（图标比省还大，不能只看光标下的像素） ---- */
 const pickCity = await p.eval(`
   ${VIEW}

@@ -1595,12 +1595,16 @@ function drawRecruits(){
   }
   ctx.textAlign='left';
 }
-/* ---------- 行军路线：红色箭头特效 ----------
-   底下一层暗红描边（雪地/沙漠上也看得清），上面是流动的红色箭头，终点一个大箭头 + 光环。
+/* ---------- 行军 / 航行路线：流动箭头特效 ----------
+   陆军红箭头、海军蓝箭头（同一套画法，只换配色）：
+   底下一层暗色描边（雪地/沙漠/海面上都看得清），上面是流动的箭头，终点一个大箭头 + 光环。
    箭头位置由 now 驱动，所以只要还有军队在行军，画面就得按固定节奏重画（见 marchAnimOn）。
    全部手算顶点，不用 save/rotate/ellipse —— 单元测试里的 canvas 桩没有这些方法。 */
-function drawMarchArrows(pts,now){
+const ARROW_RED ={ edge:'rgba(28,4,2,0.40)',   band:'rgba(224,46,34,0.78)', fill:[255,74,54],  line:'rgba(58,6,2,',   halo:'rgba(255,96,72,0.7)'  };
+const ARROW_BLUE={ edge:'rgba(2,14,30,0.42)',  band:'rgba(48,150,230,0.80)', fill:[96,196,255], line:'rgba(4,26,52,',  halo:'rgba(120,210,255,0.72)' };
+function drawMarchArrows(pts,now,pal){
   if(!pts||pts.length<2) return;
+  const C=pal||ARROW_RED;
   const seg=[]; let total=0;
   for(let i=1;i<pts.length;i++){
     const dx=pts[i][0]-pts[i-1][0], dy=pts[i][1]-pts[i-1][1];
@@ -1609,7 +1613,7 @@ function drawMarchArrows(pts,now){
     total+=len;
   }
   if(total<2) return;
-  // ① 暗色底线 + 红色主线（round 头尾，路线看起来像一条绶带）
+  // ① 暗色底线 + 主色主线（round 头尾，路线看起来像一条绶带）
   if(ctx.setLineDash) ctx.setLineDash([]);
   const band=(w,col)=>{
     ctx.strokeStyle=col; ctx.lineWidth=w; ctx.lineJoin='round'; ctx.lineCap='round';
@@ -1617,9 +1621,9 @@ function drawMarchArrows(pts,now){
     for(let i=1;i<pts.length;i++) ctx.lineTo(pts[i][0],pts[i][1]);
     ctx.stroke();
   };
-  band(6.0,'rgba(28,4,2,0.40)');
-  band(3.2,'rgba(224,46,34,0.78)');
-  // ② 流动的红色箭头
+  band(6.0,C.edge);
+  band(3.2,C.band);
+  // ② 流动的箭头
   const SP=24, speed=36;                       // 间距 24px，每秒推进 36px
   const phase=((now*0.001*speed)%SP+SP)%SP;
   const tri=(x,y,ux,uy,s,alpha)=>{
@@ -1629,8 +1633,8 @@ function drawMarchArrows(pts,now){
     ctx.lineTo(x-ux*s*0.72+px*s*0.70,y-uy*s*0.72+py*s*0.70);
     ctx.lineTo(x-ux*s*0.72-px*s*0.70,y-uy*s*0.72-py*s*0.70);
     ctx.closePath();
-    ctx.fillStyle=`rgba(255,74,54,${alpha})`; ctx.fill();
-    ctx.strokeStyle=`rgba(58,6,2,${alpha*0.85})`; ctx.lineWidth=1.1; ctx.stroke();
+    ctx.fillStyle=`rgba(${C.fill[0]},${C.fill[1]},${C.fill[2]},${alpha})`; ctx.fill();
+    ctx.strokeStyle=C.line+(alpha*0.85)+')'; ctx.lineWidth=1.1; ctx.stroke();
   };
   let acc=0,k=0;
   for(let d=phase;d<total;d+=SP){
@@ -1646,12 +1650,13 @@ function drawMarchArrows(pts,now){
   const pulse=1+0.15*Math.sin(now*0.006);
   tri(end[0],end[1],last.ux,last.uy,10.0*pulse,0.95);
   ctx.beginPath(); ctx.arc(end[0],end[1],8+2.4*Math.sin(now*0.005),0,6.2832);
-  ctx.strokeStyle='rgba(255,96,72,0.7)'; ctx.lineWidth=1.7; ctx.stroke();
+  ctx.strokeStyle=C.halo; ctx.lineWidth=1.7; ctx.stroke();
 }
-// 是否有「正在行军的选中军队」：有的话箭头要动，必须让帧指纹每 50ms 变一次
+// 是否有「正在行军/航行的选中军队」：有的话箭头要动，必须让帧指纹每 50ms 变一次
 function marchAnimOn(){
   const a=armies.find(x=>x.id===selectedArmy);
-  return !!(a&&a.owner===player&&!a.isNavy&&a.path&&a.path.length);
+  if(!a||a.owner!==player) return false;
+  return a.isNavy ? !!(a.navPath&&a.navPath.length) : !!(a.path&&a.path.length);
 }
 function drawArmies(){
   const c0=countries[player];
@@ -1659,21 +1664,20 @@ function drawArmies(){
   const sa=armies.find(a=>a.id===selectedArmy);
   if(sa&&sa.owner===player){
     if(sa.isNavy&&sa.navPath&&sa.navPath.length){
-      // 海路虚线（沿像素路径）
-      ctx.strokeStyle='rgba(120,200,255,0.9)'; ctx.lineWidth=1.8; ctx.setLineDash([5,4]);
-      ctx.beginPath();
-      let [px,py]=w2s(...armyPos(sa)); ctx.moveTo(px,py);
+      // 海路：和陆路同一套流动箭头，配色换成海蓝
+      const pts=[];
+      { const [px,py]=w2s(...armyPos(sa)); pts.push([px,py]); }
       for(let i=sa.navIdx;i<sa.navPath.length;i++){
         const pix=sa.navPath[i], r=(pix/COLS)|0, c=pix%COLS;
-        const [x,y]=w2s(nearX(c+0.5),r+0.5); ctx.lineTo(x,y);
+        const [x,y]=w2s(nearX(c+0.5),r+0.5); pts.push([x,y]);
       }
-      ctx.stroke(); ctx.setLineDash([]);
+      drawMarchArrows(pts,performance.now(),ARROW_BLUE);
     } else if(sa.path.length){
       // 陆路：红色箭头特效（沿省份中心连线，动画由 performance.now 驱动）
       const pts=[];
       { const [px,py]=w2s(...armyPos(sa)); pts.push([px,py]); }
       for(const pid of sa.path){ const p=provinces[pid]; if(!p) continue; const [x,y]=w2s(nearX(p.cx),p.cy); pts.push([x,y]); }
-      drawMarchArrows(pts,performance.now());
+      drawMarchArrows(pts,performance.now(),ARROW_RED);
       // 终点画一个行军目标环，一眼看出这一走要打到哪
       const end=pts[pts.length-1];
       if(end){ const pl=sa.path[sa.path.length-1], pp=provinces[pl];
@@ -2978,6 +2982,12 @@ function infoTab(){
           <div><button class="act" style="background:#3a1c18;border-color:#a05040;color:#f0b0a0" data-act="assault" data-v="${a.id}" data-p="${tg.id}">⚔ 开进 ${tg.name} 攻城</button></div>`;
       }
     }
+    /* 围城中的军队：只能原路撤围（进城时记下的那一格），给一个明确的按钮 */
+    if(!a.isNavy&&a.owner===player){
+      const ret=cityRetreatFor(a);
+      if(ret) h+=`<div class="row"><span>围城中</span><span class="hint">只能原路撤围（退回 ${provinces[ret]?provinces[ret].name:'进城前那一格'}），不能从别的方向绕出去</span></div>
+        <div><button class="act" data-act="retreat" data-v="${a.id}">↩ 撤围（原路返回 ${provinces[ret]?provinces[ret].name:''}）</button></div>`;
+    }
     if(a.owner===player) h+=`<div><button class="act danger" data-act="disband" data-v="${a.id}">解散${a.isNavy?'舰队':'军团'}</button></div>`;
     h+=`<p class="hint">${a.isNavy?'选中后点击地图任意海岸省份下达航行令，右键取消。':'选中后点击地图任意省份下达行军令，右键取消。'}</p><div class="sep"></div>`;
   }
@@ -3251,6 +3261,7 @@ document.addEventListener('click',e=>{
     case 'recruit-navy': doRecruitNavy(+v); break;
     case 'disband': if(MP.online){ mpCmd({c:'disband',army:+v}); break; } armies=armies.filter(a=>a.id!==+v); if(selectedArmy===+v)selectedArmy=0; refreshPanel(); break;
     case 'assault': doAssault(+v,+el.dataset.p); break;
+    case 'retreat': doRetreat(+v); break;
     case 'declare': doDeclare(+v); break;
     case 'found-vassal': {
       const p=provinces[+v];
@@ -3444,9 +3455,21 @@ function doAssault(armyId,pid){
   const a=armies.find(x=>x.id===armyId), p=provinces[pid];
   if(!a||!p||a.isNavy) return;
   if(MP.online) return mpCmd({c:'path',army:a.id,to:pid});
-  const path=findPath(a.prov,pid,a.owner);
+  const path=findPath(a.prov,pid,a.owner,cityRetreatFor(a));
   if(path&&path.length){ a.path=path; a.prog=0; a.dstProv=pid; }
   else pushLog(`${p.name} 打不通：先解决挡路的城防`,'war');
+  refreshPanel();
+}
+/* 撤围：原路退回到进城前那一格（围城中的军队只能这么走） */
+function doRetreat(armyId){
+  const a=armies.find(x=>x.id===armyId);
+  if(!a) return;
+  const ret=cityRetreatFor(a);
+  if(!ret) return;
+  if(MP.online) return mpCmd({c:'path',army:a.id,to:ret});
+  const path=findPath(a.prov,ret,a.owner,ret);
+  if(path&&path.length){ a.path=path; a.prog=0; }
+  pushLog(`撤围：${provinces[a.prov]?provinces[a.prov].name:''} 的围城部队原路退回 ${provinces[ret]?provinces[ret].name:''}`,'war');
   refreshPanel();
 }
 function doRecruitNavy(pid){
@@ -3866,10 +3889,16 @@ function handleClick(sx,sy){
     if(cedeMapClick(pid)) return;
     const a=armies.find(x=>x.id===selectedArmy);
     if(a&&a.owner===player&&pid!==a.prov){
+      // 围城中的军队只能原路撤围（进城时记下的那一格），和服务端同一条规则
+      const ret=a.isNavy?0:cityRetreatFor(a);
+      if(ret&&pid!==ret){
+        pushLog(`围城中的军队只能原路撤围：先退回 ${provinces[ret]?provinces[ret].name:'进城前那一格'}`,'war');
+        selectedProv=pid; updateSelOverlay(); refreshPanel(); return;
+      }
       if(MP.online){
         // 先用本地结果立刻画出行军路线（世界生成是确定性的，路径与服务端一致），
         // 等服务端那一帧增量回来再以它为准；未被确认的会在 1.2 秒后撤掉
-        const np = a.isNavy ? findNavalPath(a.prov,pid) : findPath(a.prov,pid,a.owner);
+        const np = a.isNavy ? findNavalPath(a.prov,pid) : findPath(a.prov,pid,a.owner,ret);
         if(np){
           if(a.isNavy){ a.navPath=np; a.navIdx=0; a.navIdxF=0; a.navIdxSrv=0; a.dstProv=pid; a.path=[]; a.prog=0; }
           else { a.path=np; a.prog=0; a.progSrv=0; a.dstProv=np[np.length-1]; }
@@ -3881,7 +3910,7 @@ function handleClick(sx,sy){
         if(np){ a.navPath=np; a.navIdx=0; a.dstProv=pid; a.path=[]; a.prog=0; }
         else pushLog(provinces[pid].coastPix.length?'无法找到通往该省的海路（被冰封阻隔？）':'目标省没有海岸线，无法派遣舰队');
       } else {
-        const path=findPath(a.prov,pid,a.owner);
+        const path=findPath(a.prov,pid,a.owner,ret);
         if(path){ a.path=path; a.prog=0; }
         else pushLog(findPath(a.prov,pid,0)
           ? '打不通：路上有敌方城防（城防外圈禁止敌军横穿），必须先把它攻下来'

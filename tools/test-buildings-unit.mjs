@@ -838,5 +838,95 @@ const aiLong = run(`
 console.log(`  两年半模拟后：AI 领地上已有 ${aiLong.aiForts} 座城防、${aiLong.aiSites} 处在建；最热的省是 ${aiLong.hotName}（${aiLong.hot}）`);
 check('【AI】长局里 AI 会自己在热点地区修起城防', aiLong.aiForts + aiLong.aiSites > 0, aiLong);
 
+/* ================= 14. 【核心】围城中只能原路撤围 ================= */
+console.log('\n-- 14. 【核心】进城围城后只能原路撤出（不能从另一侧绕出去穿城） --');
+const retreat = run(`
+  const A=countries.find(c=>c&&c.alive&&c.provList.length>12);
+  const B=countries.find(c=>c&&c.alive&&c.id!==A.id&&c.provList.length>8&&!atWar(A.id,c.id));
+  declareWar(B.id,A.id);
+  // 找一座要塞 F：外圈里有一格 R 作为"来路"，另一格 R2 外侧还有省 O 且 O 不挨着 R
+  // （这样"从 F 绕到 O"就必须经过要塞另一侧 = 穿城）
+  let F=0,R=0,R2=0,O=0;
+  for(const pid of A.provList){
+    const p=provinces[pid];
+    if(!p||!p.pix.length||p.nbrs.length<3) continue;
+    const ring=p.nbrs.filter(r=>provinces[r]&&provinces[r].pix.length);
+    if(ring.length<3) continue;
+    for(const r of ring){
+      for(const r2 of ring){
+        if(r2===r||provinces[r].nbrs.includes(r2)) continue;
+        const far=provinces[r2].nbrs.find(q=>q!==pid&&provinces[q]&&provinces[q].pix.length
+          &&!ring.includes(q)&&!provinces[r].nbrs.includes(q));
+        if(far){ F=pid; R=r; R2=r2; O=far; break; }
+      }
+      if(F) break;
+    }
+    if(F) break;
+  }
+  if(!F) return null;
+  const p=provinces[F];
+  p.fort=3;
+  armies=armies.filter(a=>a.owner!==B.id);
+  const a={id:95001,owner:B.id,prov:R,str:20000,path:[],prog:0};
+  armies.push(a);
+  // ① 从外圈开进城市格：允许，进城后自动记住来路
+  const inPath=findPath(R,F,B.id);
+  const beforeRetreat=cityRetreatFor(a);
+  a.path=inPath.slice();
+  let inDays=0;
+  while(a.prov!==F&&inDays<60){ tickDay(); inDays++; }
+  const cameFrom=a.cameFrom;
+  const ret=cityRetreatFor(a);
+  // ② 围城中想去 O：第一步必须踩回 R（来路）；不带限制时它会直接从 R2 那一侧出去（这就是原来的穿城）
+  const escape=findPath(F,O,B.id,ret);
+  const escapeNoRet=findPath(F,O,B.id);
+  const escapeFirst=escape?escape[0]:0, escapeNoRetFirst=escapeNoRet?escapeNoRet[0]:0;
+  // ③ 原路撤回 R：允许
+  const back=findPath(F,R,B.id,ret);
+  // ④ 行军途中的兜底：硬塞一条"从城市格绕过另一侧"的路径，也必须走不出去
+  a.path=[O];
+  let moved=0;
+  for(let d=0;d<20;d++){ const bf=a.prov; tickDay(); if(a.prov!==bf) moved++; }
+  const res={ F, R, R2, O, fname:p.name, canEnter:!!inPath&&inPath[inPath.length-1]===F, inDays,
+              cameFrom, ret, cameFromIsR:cameFrom===R, beforeRetreat,
+              escapeFirst, escapeNoRetFirst, escape:!!escape, escapeNoRet:!!escapeNoRet,
+              back:!!back&&back[back.length-1]===R,
+              stayed:a.prov===F, moved, finalProv:a.prov };
+  armies=armies.filter(x=>x.id!==95001);
+  p.fort=0; p.controller=p.owner; p.siege=0;
+  return res;
+`);
+if (!retreat) {
+  console.log('  SKIP  没找到合适的要塞位置');
+} else {
+  console.log(`  要塞 ${retreat.fname}：从 #${retreat.R} 进城（记下来路 #${retreat.cameFrom}）`);
+  check('外圈能开进城市格（攻城路线通）', retreat.canEnter === true, retreat);
+  check('【核心】进城时记住了来路（进城前那一格）', retreat.cameFromIsR === true, retreat);
+  check('【核心】围城中要出城只能先踩回来路那一格（第一步 = 进城前那一格）',
+    retreat.escapeFirst === retreat.R && retreat.escape === true, retreat);
+  check('（对照）不带这条限制时，它会直接从要塞另一侧 #' + retreat.R2 + ' 出去 —— 就是原来的穿城路线',
+    retreat.escapeNoRet === true && retreat.escapeNoRetFirst === retreat.R2, retreat);
+  check('【核心】原路撤回进城前那一格：允许', retreat.back === true, retreat);
+  check('【核心】硬塞穿城路径也走不出去（行军阶段同样拦）',
+    retreat.stayed === true && retreat.moved === 0, retreat);
+  check('不围城时没有这条限制', retreat.beforeRetreat === 0, retreat);
+}
+
+/* ================= 15. 存档保留来路 ================= */
+const retSave = run(`
+  const A=countries.find(c=>c&&c.alive&&c.provList.length>8);
+  const pid=A.provList.find(x=>provinces[x].pix.length);
+  const nb=provinces[pid].nbrs.find(q=>provinces[q].pix.length);
+  armies=armies.filter(a=>a.owner!==A.id);
+  armies.push({id:96001,owner:A.id,prov:pid,str:5000,path:[],prog:0,cameFrom:nb});
+  const snap=makeSaveData();
+  applySaveData(JSON.parse(JSON.stringify(snap)));
+  const a=armies.find(x=>x.id===96001);
+  const out={ cameFrom:a?a.cameFrom:0, nb };
+  armies=armies.filter(x=>x.id!==96001);
+  return out;
+`);
+check('存档/读档保留「围城来路」', retSave.cameFrom === retSave.nb, retSave);
+
 console.log(`\n=== result: ${failures === 0 ? 'ALL PASS' : failures + ' FAILED'} ===\n`);
 process.exit(failures ? 1 : 0);
