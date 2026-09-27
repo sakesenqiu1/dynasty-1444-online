@@ -728,5 +728,115 @@ if (!pick) {
   check('从外圈能走进城市格（有路可走）', pick.canEnterF1 === true, pick);
 }
 
+/* ================= 13. AI 按战争热点自己修堡垒 ================= */
+console.log('\n-- 13. 【AI】战争热点 → AI 自己在热点修城防 --');
+const aib = run(`
+  const C=countries.find(c=>c&&c.alive&&!isHuman(c.id)&&c.provList.length>8);
+  if(!C) return null;
+  // 场地清干净：本国全部省没城防、没工地
+  for(const pid of C.provList){ const p=provinces[pid]; if(!p) continue; p.fort=0; p.barracks=0; p.buildKind=''; p.buildDays=0; p.buildTotal=0; }
+  ensureProvHeat(); provHeat.fill(0);
+  const own=C.provList.filter(pid=>provinces[pid].controller===C.id&&provinces[pid].pix.length);
+  if(own.length<3) return null;
+  const hot=own[0], cold=own[1];
+  C.gold=20000;
+  addHeat(hot,60); addHeat(cold,4);
+  const heatBefore=provHeat[hot];
+  const goldBefore=C.gold;
+  aiBuild();
+  const out1={ kind:provinces[hot].buildKind, days:provinces[hot].buildDays,
+               coldKind:provinces[cold].buildKind, spent:goldBefore-C.gold,
+               cost:buildCost(provinces[hot],'fort')||FORT_COST[1],
+               heatAfter:provHeat[hot], heatBefore, hot, cold, hotName:provinces[hot].name };
+  // ① 穷国不修（留军费）
+  for(const pid of C.provList){ const p=provinces[pid]; p.buildKind=''; p.fort=0; p.barracks=0; }
+  provHeat.fill(0); addHeat(hot,999);
+  C.gold=0; aiBuild();
+  out1.poorKind=provinces[hot].buildKind;
+  // ② 玩家自己的省份绝不自动开工
+  for(const pid of C.provList){ const p=provinces[pid]; p.buildKind=''; }
+  C.gold=20000;
+  const prevHumans=humans; humans=new Set([C.id]);
+  provHeat.fill(0); addHeat(hot,999);
+  aiBuild();
+  out1.humanKind=provinces[hot].buildKind;
+  humans=prevHumans;
+  // ③ 城防满了就改建兵营
+  for(const pid of C.provList){ const p=provinces[pid]; p.buildKind=''; p.fort=0; p.barracks=0; }
+  provinces[hot].fort=FORT_MAX;
+  provHeat.fill(0); addHeat(hot,999);
+  aiBuild();
+  out1.maxedKind=provinces[hot].buildKind;
+  // 收尾
+  for(const pid of C.provList){ const p=provinces[pid]; if(!p) continue; p.buildKind=''; p.buildDays=0; p.buildTotal=0; p.fort=0; p.barracks=0; }
+  provHeat.fill(0);
+  return out1;
+`);
+if (!aib) {
+  console.log('  SKIP  没找到合适的 AI 国家');
+} else {
+  console.log(`  AI 在热点省 ${aib.hotName}（热度 ${aib.heatBefore.toFixed(0)}）开工 ${aib.kind}，花 ${aib.spent} 金`);
+  check('【AI】热度最高的省自己开工修城防', aib.kind === 'fort', aib);
+  check('【AI】没热度的省不会乱开工', aib.coldKind === '', aib);
+  check('【AI】扣钱按正常造价（和玩家一个价）', aib.spent === aib.cost, aib);
+  check('【AI】开工后该省热度降下来（不再重复拥挤在一点）', aib.heatAfter < aib.heatBefore * 0.5, aib);
+  check('【AI】穷国（钱不够留军费）不会硬修', aib.poorKind === '', aib);
+  check('【AI】玩家自己的省份绝不自动开工', aib.humanKind === '', aib);
+  check('【AI】城防修满后改用兵营', aib.maxedKind === 'barracks', aib);
+}
+
+/* ---- 热度怎么来的：打起来就热，不打就凉 ---- */
+const heatFlow = run(`
+  const A=countries.find(c=>c&&c.alive&&c.provList.length>10);
+  const D=countries.find(c=>c&&c.alive&&c.id!==A.id&&c.provList.length>10&&!atWar(A.id,c.id));
+  declareWar(D.id,A.id);
+  ensureProvHeat(); provHeat.fill(0);
+  let pid=0;
+  for(const q of A.provList){ const p=provinces[q]; if(p&&p.pix.length&&p.nbrs.length>=3&&p.controller===A.id){ pid=q; break; } }
+  if(!pid) return null;
+  const nb=provinces[pid].nbrs[0];
+  armies=armies.filter(a=>a.owner!==A.id&&a.owner!==D.id);
+  armies.push({id:94001,owner:A.id,prov:pid,str:30000,path:[],prog:0});
+  armies.push({id:94002,owner:D.id,prov:pid,str:30000,path:[],prog:0});
+  const zero=provHeat[pid];
+  for(let d=0;d<6;d++) tickDay();
+  const battle=provHeat[pid], neighbour=provHeat[nb];
+  // 撤走敌军 → 不再有战事，热度按月衰减
+  armies=armies.filter(a=>a.id!==94002);
+  const before=provHeat[pid];
+  const monthly=monthlyTick, mt=()=>{};
+  decayHeat();
+  const after=provHeat[pid];
+  for(const a of [94001]) a.dead=true;
+  armies=armies.filter(a=>a.id!==94001);
+  provHeat.fill(0);
+  return { pid, zero, battle, neighbour, before, after };
+`);
+if (!heatFlow) {
+  console.log('  SKIP  没找到可以开战的位置');
+} else {
+  console.log(`  会战省热度 ${heatFlow.zero.toFixed(1)} → ${heatFlow.battle.toFixed(1)}（邻省也热到 ${heatFlow.neighbour.toFixed(1)}）`);
+  check('【AI】打起来的省热度上升', heatFlow.battle > 2, heatFlow);
+  check('【AI】热度会渗到邻省（一整片战区，不是孤立一点）', heatFlow.neighbour > 0, heatFlow);
+  check('【AI】不打之后热度按月衰减', heatFlow.after < heatFlow.before, heatFlow);
+}
+
+/* ---- 长局：AI 真的会在战争里长出要塞 ---- */
+const aiLong = run(`
+  let aiForts=0, aiSites=0;
+  for(let d=0;d<900;d++) tickDay();          // 约两年半的真实模拟
+  for(let i=1;i<provinces.length;i++){
+    const p=provinces[i];
+    if(!p||!p.pix.length||!p.owner||isHuman(p.owner)) continue;
+    if(p.fort>0) aiForts++;
+    if(p.buildKind==='fort') aiSites++;
+  }
+  let hot=0, hotName='';
+  if(provHeat) for(let i=1;i<provinces.length;i++) if(provHeat[i]>hot){ hot=provHeat[i]; hotName=provinces[i].name; }
+  return { aiForts, aiSites, hot:+hot.toFixed(1), hotName };
+`);
+console.log(`  两年半模拟后：AI 领地上已有 ${aiLong.aiForts} 座城防、${aiLong.aiSites} 处在建；最热的省是 ${aiLong.hotName}（${aiLong.hot}）`);
+check('【AI】长局里 AI 会自己在热点地区修起城防', aiLong.aiForts + aiLong.aiSites > 0, aiLong);
+
 console.log(`\n=== result: ${failures === 0 ? 'ALL PASS' : failures + ' FAILED'} ===\n`);
 process.exit(failures ? 1 : 0);

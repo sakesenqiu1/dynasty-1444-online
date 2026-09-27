@@ -1274,6 +1274,7 @@ function resolveBattles(){
       if(atWar(list[i].owner,list[j].owner)){ hostile=true; break outer; }
     if(!hostile) continue;
     battleProvs.add(pid);
+    addHeat(pid,3);                    // 会战 = 这一片是战场
     const sides=new Map();
     for(const a of list) sides.set(a.owner,(sides.get(a.owner)||0)+a.str);
     for(const a of list){
@@ -1341,10 +1342,12 @@ function resolveSieges(){
     for(const a of list) if(atWar(a.owner,p.controller)){ bstr+=a.str; if(!bowner)bowner=a.owner; }
     if(bstr>0){
       p.siege+=siegeDailyProgress(bstr,p);
+      addHeat(pid,0.12);               // 被围攻 = 这一片在打仗
       if(p.siege>=100){
         p.siege=0;
         const old=p.controller;
         p.controller=bowner;
+        addHeat(pid,4);                // 易主 = 争夺最激烈的地方
         // 城防跟着省一起易主：控制区消失，攻方接手后反过来挡原主
         UI.recolorNbrs(pid);
         const fortTxt=p.fort?`（城防 Lv.${p.fort} 被攻破）`:'';
@@ -1354,6 +1357,65 @@ function resolveSieges(){
     } else if(p.siege>0){
       p.siege=Math.max(0,p.siege-2);
     }
+  }
+}
+
+/* ---------- 战争热点图（AI 用它决定在哪儿修堡垒） ----------
+   规则很简单：哪里打过会战、哪里被围过城、哪里易过主，那一省的热度就加一笔；
+   热度会往邻省渗一点（一片战区整体变热，而不是只有一个孤立的点），每月整体衰减。
+   AI 每月挑「自己控制着、热度最高、城防还没修满」的那一省开工修堡垒 ——
+   于是经常打仗的边境会自己长出要塞，太平的内地不会乱花钱。
+
+   这份数据只影响 AI 的决策，不参与联机同步（服务端算、客户端从增量里看到结果），
+   所以它不需要进存档，读档后从零重新积累即可。 */
+let provHeat=null;
+function ensureProvHeat(){
+  if(!provHeat||provHeat.length!==provinces.length) provHeat=new Float32Array(provinces.length);
+}
+/* 给一省加热度，并向邻省渗 35%（约等于"这一片在打仗"） */
+function addHeat(pid,v){
+  if(!pid||!(v>0)) return;
+  ensureProvHeat();
+  if(provHeat[pid]<1e4) provHeat[pid]+=v;
+  const p=provinces[pid];
+  if(!p) return;
+  const nb=p.nbrs;
+  for(let k=0;k<nb.length;k++) if(provHeat[nb[k]]<1e4) provHeat[nb[k]]+=v*0.35;
+}
+/* 每月衰减：老战场慢慢凉下来，只有反复打仗的地方才会一直热 */
+function decayHeat(){
+  if(!provHeat) return;
+  for(let i=1;i<provHeat.length;i++) if(provHeat[i]>0) provHeat[i]*=0.84;
+}
+/* AI 月度建造：按热度挑地方修城防 / 兵营（玩家自己的省份不碰） */
+function aiBuild(){
+  ensureProvHeat();
+  const best=new Map();                 // cid -> {pid,heat}
+  for(let i=1;i<provinces.length;i++){
+    const p=provinces[i];
+    if(!p||!p.pix.length||!p.owner||p.controller!==p.owner) continue;
+    if(provHeat[i]<=0) continue;
+    const c=countries[p.owner];
+    if(!c||!c.alive||isHuman(c.id)) continue;
+    const cur=best.get(c.id);
+    if(!cur||provHeat[i]>cur.heat) best.set(c.id,{pid:i,heat:provHeat[i]});
+  }
+  for(const [cid,b] of best){
+    const c=countries[cid];
+    if(!c||!c.alive) continue;
+    const p=provinces[b.pid];
+    ensureProvinceBuildings(p);
+    if(p.buildKind) continue;                       // 本省工地已经占着了
+    // 先修城防（热点地区最缺的就是工事），修满了再补兵营
+    let kind='';
+    if((p.fort|0)<FORT_MAX) kind='fort';
+    else if(!p.barracks) kind='barracks';
+    if(!kind) continue;
+    const cost=buildCost(p,kind);
+    // 留一笔军费：太穷的国家先攒钱，不至于为了修堡垒把军队饿死
+    if((c.gold||0)<cost+150) continue;
+    const err=buildBuilding(cid,b.pid,kind);
+    if(!err) provHeat[b.pid]*=0.35;                 // 开工之后这一省暂时不那么急了
   }
 }
 
@@ -1367,6 +1429,7 @@ function monthlyTick(){
      它只是"每月做一次决策"，早一天晚一天没有区别，
      推到一个 tick 之后能把这根尖峰摊成两半，服务端就不容易掉帧。 */
   _aiPending=true;
+  decayHeat();               // 战争热点每月凉一点，只有反复开战的地方才一直热
   attritionMonthly();
   // 兜底：任何绕开 makePeace 的宗主/盟约变动（放附庸独立、吞并、复国……）
   // 都可能留下"控制者与所有者已不交战"的幽灵占领，每月清一次
@@ -1929,6 +1992,7 @@ function aiMonthly(){
       UI.panel();
     }
   }
+  aiBuild();          // 月度最后一步：AI 按战争热点给自己修工事
 }
 
 /* ---------- 战争与和平 ---------- */
@@ -2485,6 +2549,7 @@ function buildWorldFromScenario(s){
 function resetWorld(){
   _seed=987654321;
   land=null; provOf=null;
+  provHeat=null;                 // 战争热点随世界一起重来
   provinces=[null]; countries=[null];
   armies=[]; nextArmy=1;
   recruits=[]; nextRecruit=1;
@@ -2678,6 +2743,7 @@ if(typeof module!=='undefined'&&module.exports){
     BARRACKS_COST,BARRACKS_DAYS,FORT_COST,FORT_DAYS,BUILD_NAMES,
     ensureProvinceBuildings,garrisonOf,buildCost,buildDays,buildBuilding,demolishBuilding,tickBuild,
     zocMapFor,zocAllows,hostileFortAt,hostileFortsAt,blockingFortFor,routeToBesiege,siegeDailyProgress,
+    ensureProvHeat,addHeat,decayHeat,aiBuild,provHeat,
     tickDay,advanceDay,mergeArmies,resolveBattles,resolveSieges,monthlyTick,economy,aiMonthly,
     declareWar,makePeace,transferProvince,checkDeath,vassalize,releaseStaleOccupations,
     warScore,peaceCost,releaseCost,canDemandProvince,occRatio,atWar,inWar,truceBetween,truceKey,
